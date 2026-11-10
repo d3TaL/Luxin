@@ -1,0 +1,13 @@
+# Local Python environment for recognition experiments
+.venv/
+
+# Raw game screenshots: contain the account UID, never commit
+photo/
+
+# Third-party sources and downloaded samples used for research
+research/src/
+research/samples/
+research/tools/
+
+# Experiment output
+spike/out/
