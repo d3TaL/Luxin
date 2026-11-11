@@ -34,7 +34,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
@@ -52,6 +54,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -65,8 +68,11 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.d3tal.luxin.capture.CaptureResult
 import io.github.d3tal.luxin.capture.CaptureService
+import io.github.d3tal.luxin.data.KongyingSyncManager
 import io.github.d3tal.luxin.overlay.OverlayService
+import io.github.d3tal.luxin.tracker.NativeSplitTracker
 import io.github.d3tal.luxin.ui.theme.LuxinTheme
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -88,6 +94,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun CaptureSpikeScreen() {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     var hasOverlayPermission by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
     var hasNotificationPermission by remember {
@@ -103,9 +110,13 @@ fun CaptureSpikeScreen() {
         )
     }
 
+    var nativeJniStatus by remember { mutableStateOf("Не проверено") }
+    var isSyncing by remember { mutableStateOf(false) }
+
     val isOverlayActive by OverlayService.isShowing.collectAsStateWithLifecycle()
     val isCaptureActive by CaptureService.isRunning.collectAsStateWithLifecycle()
     val captureResult by CaptureService.latestResult.collectAsStateWithLifecycle()
+    val syncSummary by KongyingSyncManager.syncState.collectAsStateWithLifecycle()
 
     // Activity result launcher for MediaProjection permission
     val mediaProjectionLauncher = rememberLauncherForActivityResult(
@@ -131,6 +142,13 @@ fun CaptureSpikeScreen() {
         if (!hasNotificationPermission && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+        try {
+            NativeSplitTracker().use { tracker ->
+                nativeJniStatus = tracker.runSelfTest()
+            }
+        } catch (e: Throwable) {
+            nativeJniStatus = "JNI Error: ${e.message}"
+        }
     }
 
     Column(
@@ -142,18 +160,101 @@ fun CaptureSpikeScreen() {
     ) {
         // App header
         Text(
-            text = "Luxin Capture Spike",
+            text = "Luxin v0.2 — Tracker & Data",
             style = MaterialTheme.fontSizeTitleLarge(),
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.primary
         )
         Text(
-            text = "Проверка изоляции захвата экрана и системного оверлея на Android 14 (SM-S938B)",
+            text = "C++17 SplitTracker (OpenCV 4.10 JNI), синхронизация Kongying Tavern и системный оверлей (SM-S938B)",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
         )
 
-        // Card 1: Overlay Permission & Control
+        // Card 1: C++ Native Tracker & Kongying Sync
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Memory,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "1. Ядро C++ (JNI) и данные Kongying",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = "Статус C++ JNI: $nativeJniStatus",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (nativeJniStatus.startsWith("OK")) Color(0xFF4CAF50) else Color(0xFFFFB74D),
+                    fontWeight = FontWeight.Medium
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Divider()
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.CloudDownload,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.secondary
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "База Kongying: ${syncSummary.status}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+
+                if (syncSummary.areaCount > 0) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Областей: ${syncSummary.areaCount} | Предметов: ${syncSummary.itemCount} | " +
+                                "Чанков меток: ${syncSummary.markerChunksTotal} | " +
+                                "Загружено меток (проба): ${syncSummary.markerCountSample} (подземных: ${syncSummary.undergroundMarkerCount})",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
+                    )
+                }
+
+                if (syncSummary.error != null) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = syncSummary.error!!,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFF44336)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(
+                    onClick = {
+                        isSyncing = true
+                        scope.launch {
+                            KongyingSyncManager.syncMetadataAndSampleChunk(context)
+                            isSyncing = false
+                        }
+                    },
+                    enabled = !isSyncing,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (isSyncing) "Загрузка из Kongying..." else "Синхронизировать базу Kongying")
+                }
+            }
+        }
+
+        // Card 2: Overlay Permission & Control
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
@@ -167,7 +268,7 @@ fun CaptureSpikeScreen() {
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "1. Системный оверлей",
+                        text = "2. Системный оверлей",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold
                     )
@@ -200,7 +301,7 @@ fun CaptureSpikeScreen() {
                     StatusRow(
                         label = "Тестовая метка над миникартой",
                         active = isOverlayActive,
-                        activeText = "Отображается (пурпурный круг)",
+                        activeText = "Отображается",
                         inactiveText = "Скрыта"
                     )
                     Spacer(modifier = Modifier.height(8.dp))
@@ -227,7 +328,7 @@ fun CaptureSpikeScreen() {
             }
         }
 
-        // Card 2: Screen Capture (MediaProjection)
+        // Card 3: Screen Capture (MediaProjection)
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
@@ -241,18 +342,11 @@ fun CaptureSpikeScreen() {
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "2. Захват экрана (MediaProjection)",
+                        text = "3. Захват экрана (MediaProjection)",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold
                     )
                 }
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Text(
-                    text = "В появившемся системном диалоге выберите «Одно приложение» и укажите Genshin Impact для проверки изоляции.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                )
                 Spacer(modifier = Modifier.height(8.dp))
 
                 StatusRow(
@@ -288,7 +382,7 @@ fun CaptureSpikeScreen() {
             }
         }
 
-        // Card 3: Snapshot and Leak Check
+        // Card 4: Snapshot and Leak Check
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
@@ -302,7 +396,7 @@ fun CaptureSpikeScreen() {
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "3. Проверка утечки оверлея в кадр",
+                        text = "4. Проверка захвата кадра",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold
                     )
@@ -433,9 +527,9 @@ fun CaptureResultView(result: CaptureResult) {
                         )
                         Text(
                             text = if (result.overlayLeaked)
-                                "Пиксели метки присутствуют (${result.magentaPixelCount} px). Требуется маскирование при рисовании."
+                                "Пиксели метки присутствуют (${result.magentaPixelCount} px). При сопровождении исключаются маской."
                             else
-                                "Изоляция Android 14 работает! Захват игры чист от системного оверлея.",
+                                "Кадр чист от системного оверлея (${result.magentaPixelCount} px).",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurface
                         )

@@ -3,8 +3,9 @@ name: Android CI
 on:
   push:
     branches:
-      - android-capture-spike
       - main
+      - feat/**
+      - android-capture-spike
       - cvautotrack-evaluation
   pull_request:
     branches:
@@ -17,7 +18,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build Debug APK
+    name: Build Debug APK (with Android NDK & OpenCV 4.10)
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -18,10 +18,12 @@ spike/out/
 research/tiles_cache/
 research/ref/
 
-# Android build outputs and IDE files
+# Android and C++ build outputs and IDE files
 .gradle/
 build/
 app/build/
+app/.cxx/
+tracker/build*/
 *.apk
 *.aar
 local.properties
