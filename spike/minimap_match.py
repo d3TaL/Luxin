@@ -84,6 +84,9 @@ class Ref:
     def __init__(self, name, prefix):
         meta = json.loads(Path(prefix + ".json").read_text())
         self.name = name
+        # Different crops of the same surface are not different layer hypotheses.
+        # Legacy overlay metadata lacks identity: keep those separate, never guess a level.
+        self.map_id = meta.get("map_id") or (f"{meta['tile_code']}/surface" if meta.get("tile_code") else f"unknown:{name}")
         self.bgr = cv2.imread(prefix + ".png")
         self.gray = cv2.cvtColor(self.bgr, cv2.COLOR_BGR2GRAY)
         self.upp = float(meta["units_per_px"])

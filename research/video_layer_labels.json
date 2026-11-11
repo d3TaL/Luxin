@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "recording_id": "minimap-walk-01",
+  "recording_duration_s": 183.4,
+  "recording_resolution": [2340, 1080],
+  "source": "User identified the active floors in the recording; no positional ground truth supplied.",
+  "boundary_exclusion_s": 1.0,
+  "space": "twt702",
+  "group": "OGULOV_TOWN",
+  "intervals": [
+    {
+      "start_s": 110,
+      "end_s": 120,
+      "layer": "SNOWMELT_DRAINAGE_CHANNEL_UG2",
+      "label_zh": "融雪引流道下层",
+      "label_ru_user": "Нижний слой канала отвода снега"
+    },
+    {
+      "start_s": 120,
+      "end_s": 137,
+      "layer": "SNOWMELT_DRAINAGE_CHANNEL_UG1",
+      "label_zh": "融雪引流道上层",
+      "label_ru_user": "Верхний слой канала отвода снега"
+    },
+    {
+      "start_s": 137,
+      "end_s": 163,
+      "layer": "SNOWMELT_DRAINAGE_CHANNEL_EXIT_ENTRANCE",
+      "label_zh": "融雪引流道出入口",
+      "label_ru_user": "Вход и выход дренажного канала для отвода воды после таяния снега"
+    }
+  ]
+}

@@ -2,12 +2,18 @@
 
 Usage: python -I video_sheet.py <video> <out_dir> <step_seconds> <columns> <rows_per_sheet> [t_from t_to [x y w h]]
   x y w h   optional crop of every frame before it is scaled down (e.g. the minimap)
+  --pts     use real video timestamps (recommended for variable frame rate)
 """
 import sys
 from pathlib import Path
 
 import cv2
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from video_time import VideoClock, next_sample_time  # noqa: E402
+
+use_pts = "--pts" in sys.argv
+sys.argv = [arg for arg in sys.argv if arg != "--pts"]
 video, out = sys.argv[1], Path(sys.argv[2])
 step, cols, rows = float(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
 t_from = float(sys.argv[6]) if len(sys.argv) > 6 else 0.0
@@ -17,6 +23,7 @@ out.mkdir(parents=True, exist_ok=True)
 
 cap = cv2.VideoCapture(video)
 fps = cap.get(cv2.CAP_PROP_FPS)
+clock = VideoClock(fps, "pts" if use_pts else "fps")
 TILE_W = 2000 // cols
 tiles, sheet, idx, next_t = [], 0, 0, t_from
 
@@ -35,7 +42,7 @@ def flush():
 
 
 while cap.grab():
-    t = idx / fps
+    t = clock.at(cap, idx)
     idx += 1
     if t > t_to:
         break
@@ -44,7 +51,7 @@ while cap.grab():
     ok, frame = cap.retrieve()
     if not ok:
         break
-    next_t += step
+    next_t = next_sample_time(t, t_from, 1 / step) if use_pts else next_t + step
     if crop:
         frame = frame[crop[1]:crop[1] + crop[3], crop[0]:crop[0] + crop[2]]
     h, w = frame.shape[:2]
