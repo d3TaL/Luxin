@@ -495,13 +495,13 @@ fun CaptureResultView(result: CaptureResult) {
             }
         } else {
             Text(
-                text = "Разрешение: ${result.width} × ${result.height} | Захват: ${result.captureMs} мс",
+                text = "Кадр: ${result.width} × ${result.height} | Снимок и сохранение: ${result.captureMs} мс",
                 style = MaterialTheme.typography.bodyMedium
             )
 
             // Result banner
             Surface(
-                color = if (result.overlayLeaked) Color(0x33F44336) else Color(0x334CAF50),
+                color = if (result.overlayLeaked) Color(0x33F44336) else Color(0x33FFB74D),
                 shape = RoundedCornerShape(8.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
@@ -512,24 +512,22 @@ fun CaptureResultView(result: CaptureResult) {
                     Icon(
                         imageVector = if (result.overlayLeaked) Icons.Default.Warning else Icons.Default.CheckCircle,
                         contentDescription = null,
-                        tint = if (result.overlayLeaked) Color(0xFFF44336) else Color(0xFF4CAF50)
+                        tint = if (result.overlayLeaked) Color(0xFFF44336) else Color(0xFFFFB74D)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Column {
                         Text(
-                            text = if (result.overlayLeaked)
-                                "ОВЕРЛЕЙ ПОПАЛ В КАДР"
-                            else
-                                "ОВЕРЛЕЙ НЕ ОБНАРУЖЕН В КАДРЕ",
+                            text = when {
+                                !result.markerChecked -> "ПРОВЕРКА МЕТКИ НЕДОСТУПНА"
+                                result.overlayLeaked -> "ТЕСТОВАЯ МЕТКА ОБНАРУЖЕНА"
+                                else -> "ТЕСТОВАЯ МЕТКА НЕ НАЙДЕНА"
+                            },
                             fontWeight = FontWeight.Bold,
-                            color = if (result.overlayLeaked) Color(0xFFF44336) else Color(0xFF4CAF50),
+                            color = if (result.overlayLeaked) Color(0xFFF44336) else Color(0xFFFFB74D),
                             fontSize = 14.sp
                         )
                         Text(
-                            text = if (result.overlayLeaked)
-                                "Пиксели метки присутствуют (${result.magentaPixelCount} px). При сопровождении исключаются маской."
-                            else
-                                "Кадр чист от системного оверлея (${result.magentaPixelCount} px).",
+                            text = "${result.magentaPixelCount} пурпурных px. ${result.markerCheckNote}",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurface
                         )

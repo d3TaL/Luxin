@@ -7,6 +7,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
@@ -15,29 +16,40 @@ import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
-import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
-import android.util.DisplayMetrics
+import android.util.AtomicFile
+import android.util.Log
 import android.view.WindowManager
+import io.github.d3tal.luxin.overlay.MinimapCalibrationStore
 import io.github.d3tal.luxin.overlay.OverlayService
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileOutputStream
+import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.ceil
+import kotlin.math.floor
 
+// captureMs is snapshot processing INCLUDING the wait and PNG write, not end-to-end display latency.
 data class CaptureResult(
     val timestamp: String,
     val width: Int,
@@ -46,59 +58,69 @@ data class CaptureResult(
     val magentaPixelCount: Int,
     val captureMs: Long,
     val filePath: String,
-    val error: String? = null
+    val error: String? = null,
+    val markerChecked: Boolean = false,
+    val markerCheckNote: String = "",
+    val hiddenRequested: Boolean = false,
+    val frameTimestampNs: Long = 0
 )
 
 class CaptureService : Service() {
-
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val mainHandler = Handler(Looper.getMainLooper())
-
+    private val imageLock = Any()
+    private val snapshotBusy = AtomicBoolean(false)
+    private var snapshotJob: Job? = null
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
+    // Only accessed under imageLock, including acquisition/copy/close.
     private var imageReader: ImageReader? = null
+    private var readerWidth = 0
+    private var readerHeight = 0
+    private var generation = 0L
+    private var stopping = false
+    private var receivedContentSize = false
 
     private val projectionCallback = object : MediaProjection.Callback() {
-        override fun onStop() {
-            stopCapture()
+        override fun onStop() = stopCapture()
+
+        override fun onCapturedContentResize(width: Int, height: Int) {
+            if (stopping || mediaProjection == null) return
+            receivedContentSize = true
+            try {
+                resizeCapture(width, height)
+            } catch (e: Exception) {
+                reportError("Изменение размера: ${e.message}")
+                stopCapture()
+            }
         }
     }
 
     companion object {
+        private const val TAG = "LuxinCapture"
         const val ACTION_START = "io.github.d3tal.luxin.capture.ACTION_START"
         const val ACTION_STOP = "io.github.d3tal.luxin.capture.ACTION_STOP"
         const val ACTION_TAKE_SNAPSHOT = "io.github.d3tal.luxin.capture.ACTION_TAKE_SNAPSHOT"
-
         const val EXTRA_RESULT_CODE = "extra_result_code"
         const val EXTRA_RESULT_DATA = "extra_result_data"
         const val EXTRA_HIDE_OVERLAY = "extra_hide_overlay"
-
-        private const val NOTIFICATION_CHANNEL_ID = "luxin_capture_channel"
+        private const val CHANNEL = "luxin_capture_channel"
         private const val NOTIFICATION_ID = 1001
-
         private val _isRunning = MutableStateFlow(false)
         val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
-
         private val _latestResult = MutableStateFlow<CaptureResult?>(null)
         val latestResult: StateFlow<CaptureResult?> = _latestResult.asStateFlow()
 
         fun start(context: Context, resultCode: Int, data: Intent) {
-            val intent = Intent(context, CaptureService::class.java).apply {
+            context.startForegroundService(Intent(context, CaptureService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_RESULT_CODE, resultCode)
                 putExtra(EXTRA_RESULT_DATA, data)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
+            })
         }
 
         fun stop(context: Context) {
-            context.startService(Intent(context, CaptureService::class.java).apply {
-                action = ACTION_STOP
-            })
+            context.startService(Intent(context, CaptureService::class.java).apply { action = ACTION_STOP })
         }
 
         fun takeSnapshot(context: Context, hideOverlayDuringCapture: Boolean = false) {
@@ -113,275 +135,248 @@ class CaptureService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        createNotificationChannel()
+        requireNotNull(getSystemService(NotificationManager::class.java)).createNotificationChannel(
+            NotificationChannel(CHANNEL, "Luxin Screen Capture", NotificationManager.IMPORTANCE_LOW)
+        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
-                val data: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
-                } else {
-                    @Suppress("DEPRECATION")
-                    intent.getParcelableExtra(EXTRA_RESULT_DATA)
-                }
-
-                if (resultCode != 0 && data != null) {
-                    startCapture(resultCode, data)
+                val code = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
+                val data = intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
+                if (code != 0 && data != null) startCapture(code, data) else {
+                    reportError("Не получено разрешение MediaProjection")
+                    stopSelf()
                 }
             }
             ACTION_STOP -> stopCapture()
             ACTION_TAKE_SNAPSHOT -> {
-                val hideOverlay = intent.getBooleanExtra(EXTRA_HIDE_OVERLAY, false)
-                captureFrame(hideOverlay)
+                if (_isRunning.value) captureFrame(intent.getBooleanExtra(EXTRA_HIDE_OVERLAY, false)) else {
+                    reportError("Сначала запустите захват экрана")
+                    stopSelf()
+                }
             }
+            else -> stopSelf()
         }
         return START_NOT_STICKY
     }
 
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                NOTIFICATION_CHANNEL_ID,
-                "Luxin Screen Capture",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Active foreground capture for game sync"
-            }
-            val manager = getSystemService(NotificationManager::class.java)
-            manager?.createNotificationChannel(channel)
-        }
-    }
-
-    private fun buildNotification(): Notification {
-        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, NOTIFICATION_CHANNEL_ID)
-        } else {
-            @Suppress("DEPRECATION")
-            Notification.Builder(this)
-        }
-        return builder
-            .setContentTitle("Luxin Capture Active")
-            .setContentText("Захват экрана активен. Используйте кнопку HUD поверх игры.")
-            .setSmallIcon(android.R.drawable.ic_menu_camera)
-            .build()
-    }
-
     private fun startCapture(resultCode: Int, data: Intent) {
+        if (mediaProjection != null) return // Never reuse one consent token to create a second display.
+        stopping = false
+        receivedContentSize = false
         try {
-            val notification = buildNotification()
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(
-                    NOTIFICATION_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                )
-            } else {
-                startForeground(NOTIFICATION_ID, notification)
-            }
-
-            val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-            val projection = projectionManager.getMediaProjection(resultCode, data) ?: run {
-                _isRunning.value = false
-                return
-            }
-
-            // Required on Android 14+ (targetSdk 34+) before createVirtualDisplay
+            val notification = Notification.Builder(this, CHANNEL)
+                .setContentTitle("Luxin Capture Active")
+                .setContentText("Снимок доступен через HUD поверх игры")
+                .setSmallIcon(android.R.drawable.ic_menu_camera).build()
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+            val manager = requireNotNull(getSystemService(MediaProjectionManager::class.java))
+            val projection = requireNotNull(manager.getMediaProjection(resultCode, data))
             projection.registerCallback(projectionCallback, mainHandler)
             mediaProjection = projection
-
-            recreateVirtualDisplay()
-            _isRunning.value = true
-
-            scope.launch {
-                delay(800)
-                captureFrame(hideOverlay = false)
+            val bounds = requireNotNull(getSystemService(WindowManager::class.java)).maximumWindowMetrics.bounds
+            val dpi = resources.displayMetrics.densityDpi
+            synchronized(imageLock) {
+                val reader = ImageReader.newInstance(bounds.width(), bounds.height(), PixelFormat.RGBA_8888, 3)
+                imageReader = reader
+                readerWidth = bounds.width()
+                readerHeight = bounds.height()
+                virtualDisplay = projection.createVirtualDisplay(
+                    "LuxinCaptureSpike", readerWidth, readerHeight, dpi,
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.surface, null, mainHandler
+                )
+                generation++
             }
-        } catch (e: Throwable) {
-            e.printStackTrace()
-            _latestResult.value = CaptureResult(
-                timestamp = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date()),
-                width = 0,
-                height = 0,
-                overlayLeaked = false,
-                magentaPixelCount = 0,
-                captureMs = 0,
-                filePath = "",
-                error = "${e.javaClass.simpleName}: ${e.message}"
-            )
+            _isRunning.value = true
+            mainHandler.postDelayed({ if (_isRunning.value) captureFrame(false) }, 800)
+        } catch (e: Exception) {
+            reportError("${e.javaClass.simpleName}: ${e.message}")
             stopCapture()
         }
     }
 
-    private fun recreateVirtualDisplay() {
-        val projection = mediaProjection ?: return
-        val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        val metrics = DisplayMetrics()
-        @Suppress("DEPRECATION")
-        windowManager.defaultDisplay.getRealMetrics(metrics)
-
-        val width = metrics.widthPixels
-        val height = metrics.heightPixels
-        val dpi = metrics.densityDpi
-
-        virtualDisplay?.release()
-        imageReader?.close()
-
-        imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
-        virtualDisplay = projection.createVirtualDisplay(
-            "LuxinCaptureSpike",
-            width,
-            height,
-            dpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader?.surface,
-            null,
-            mainHandler
-        )
+    /** Resize the EXISTING display; Android 14+ permits only one createVirtualDisplay per grant. */
+    private fun resizeCapture(width: Int, height: Int) {
+        require(width > 0 && height > 0)
+        synchronized(imageLock) {
+            val display = virtualDisplay ?: return
+            if (readerWidth == width && readerHeight == height) return
+            val replacement = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
+            try {
+                display.resize(width, height, resources.displayMetrics.densityDpi)
+                display.surface = replacement.surface
+            } catch (e: Exception) {
+                replacement.close()
+                throw e
+            }
+            val old = imageReader
+            imageReader = replacement
+            readerWidth = width
+            readerHeight = height
+            generation++
+            old?.close()
+            Log.i(TAG, "Capture resized to ${width}x$height, generation=$generation")
+        }
     }
 
-    private fun captureFrame(hideOverlay: Boolean = false) {
-        scope.launch {
-            val t0 = SystemClock.elapsedRealtime()
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // App-only capture may not match the display: its own callback takes precedence.
+        if (_isRunning.value && !receivedContentSize) {
+            val b = requireNotNull(getSystemService(WindowManager::class.java)).maximumWindowMetrics.bounds
             try {
-                if (hideOverlay) {
-                    OverlayService.setMarkerTemporaryVisibility(false)
-                    delay(45) // Wait ~2-3 display frames at 60/120Hz for compositor to clear overlay
-                }
-
-                val reader = imageReader ?: run {
-                    if (hideOverlay) OverlayService.setMarkerTemporaryVisibility(true)
-                    return@launch
-                }
-
-                // Drain older buffered frame if present so we inspect the freshest frame
-                var image = reader.acquireLatestImage()
-                if (image == null) {
-                    delay(50)
-                    image = reader.acquireLatestImage()
-                }
-
-                if (hideOverlay) {
-                    OverlayService.setMarkerTemporaryVisibility(true)
-                }
-
-                if (image == null) {
-                    _latestResult.value = CaptureResult(
-                        timestamp = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date()),
-                        width = 0,
-                        height = 0,
-                        overlayLeaked = false,
-                        magentaPixelCount = 0,
-                        captureMs = SystemClock.elapsedRealtime() - t0,
-                        filePath = "",
-                        error = "Кадр не обновился (image == null). Подвигайте экран и повторите."
-                    )
-                    return@launch
-                }
-
-                val width = image.width
-                val height = image.height
-                val planes = image.planes
-                val buffer = planes[0].buffer
-                val pixelStride = planes[0].pixelStride
-                val rowStride = planes[0].rowStride
-                val rowPadding = rowStride - pixelStride * width
-
-                val bitmap = Bitmap.createBitmap(
-                    width + rowPadding / pixelStride,
-                    height,
-                    Bitmap.Config.ARGB_8888
-                )
-                bitmap.copyPixelsFromBuffer(buffer)
-                image.close()
-
-                val cleanBitmap = if (rowPadding == 0) {
-                    bitmap
-                } else {
-                    Bitmap.createBitmap(bitmap, 0, 0, width, height)
-                }
-
-                // Check for test overlay leakage: inspect top-left minimap region [x: 100..470, y: 10..360]
-                var magentaCount = 0
-                val xStart = 100.coerceAtMost(width - 1)
-                val xEnd = 470.coerceAtMost(width)
-                val yStart = 10.coerceAtMost(height - 1)
-                val yEnd = 360.coerceAtMost(height)
-
-                for (y in yStart until yEnd) {
-                    for (x in xStart until xEnd) {
-                        val px = cleanBitmap.getPixel(x, y)
-                        val r = Color.red(px)
-                        val g = Color.green(px)
-                        val b = Color.blue(px)
-                        if (r > 180 && b > 180 && g < 90) {
-                            magentaCount++
-                        }
-                    }
-                }
-
-                val captureMs = SystemClock.elapsedRealtime() - t0
-
-                // Save captured frame to app files directory for inspection
-                val timeStr = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-                val modeTag = if (hideOverlay) "hidden" else "normal"
-                val outFile = File(filesDir, "capture_${modeTag}_$timeStr.png")
-                FileOutputStream(outFile).use { out ->
-                    cleanBitmap.compress(Bitmap.CompressFormat.PNG, 90, out)
-                }
-
-                _latestResult.value = CaptureResult(
-                    timestamp = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date()),
-                    width = width,
-                    height = height,
-                    overlayLeaked = magentaCount > 50,
-                    magentaPixelCount = magentaCount,
-                    captureMs = captureMs,
-                    filePath = outFile.absolutePath
-                )
-
-            } catch (e: Throwable) {
-                if (hideOverlay) {
-                    OverlayService.setMarkerTemporaryVisibility(true)
-                }
-                e.printStackTrace()
-                _latestResult.value = CaptureResult(
-                    timestamp = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date()),
-                    width = 0,
-                    height = 0,
-                    overlayLeaked = false,
-                    magentaPixelCount = 0,
-                    captureMs = SystemClock.elapsedRealtime() - t0,
-                    filePath = "",
-                    error = "${e.javaClass.simpleName}: ${e.message}"
-                )
+                resizeCapture(b.width(), b.height())
+            } catch (e: Exception) {
+                reportError("Ориентация: ${e.message}")
+                stopCapture()
             }
         }
     }
 
-    private fun stopCapture() {
+    private data class Pixels(val width: Int, val height: Int, val bytes: ByteBuffer,
+                              val timestampNs: Long, val generation: Long)
+
+    private fun readFreshPixels(afterNs: Long): Pixels? = synchronized(imageLock) {
+        val image = imageReader?.acquireLatestImage() ?: return@synchronized null
         try {
+            if (image.timestamp <= afterNs) return@synchronized null
+            val crop = image.cropRect
+            val plane = image.planes[0]
+            Pixels(crop.width(), crop.height(), RgbaPlane.copyTight(plane.buffer, crop.width(), crop.height(),
+                plane.rowStride, plane.pixelStride, crop.left, crop.top), image.timestamp, generation)
+        } finally {
+            image.close()
+        }
+    }
+
+    private fun captureFrame(hideOverlay: Boolean) {
+        // Avoid concurrent ImageReader acquisition, hide/show races and same-second PNG overwrites.
+        if (!snapshotBusy.compareAndSet(false, true)) {
+            Log.i(TAG, "Snapshot already in progress; ignoring duplicate request")
+            return
+        }
+        snapshotJob = scope.launch {
+            val startMs = SystemClock.elapsedRealtime()
+            var bitmap: Bitmap? = null
+            var markerHidden = false
+            try {
+                val markerWasShown = OverlayService.isShowing.value
+                if (hideOverlay) {
+                    OverlayService.setMarkerTemporaryVisibilityAwait(false)
+                    markerHidden = true
+                }
+                // Flush the pre-request image. Waiting alone does not guarantee a fresh frame.
+                val barrier = System.nanoTime()
+                synchronized(imageLock) { imageReader?.acquireLatestImage()?.close() }
+                if (hideOverlay) delay(45) // Diagnostic delay, NOT a guarantee of compositor latency.
+                val deadline = SystemClock.elapsedRealtime() + 1000
+                var pixels: Pixels? = null
+                while (pixels == null && SystemClock.elapsedRealtime() < deadline) {
+                    ensureActive()
+                    pixels = readFreshPixels(barrier)
+                    if (pixels == null) delay(16)
+                }
+                val frame = pixels ?: error("Нет свежего кадра. Подвигайте экран и повторите снимок.")
+                if (markerHidden) {
+                    OverlayService.setMarkerTemporaryVisibilityAwait(true)
+                    markerHidden = false
+                }
+                val cleanBitmap = Bitmap.createBitmap(frame.width, frame.height, Bitmap.Config.ARGB_8888)
+                bitmap = cleanBitmap
+                cleanBitmap.copyPixelsFromBuffer(frame.bytes)
+
+                val display = requireNotNull(getSystemService(WindowManager::class.java)).maximumWindowMetrics.bounds
+                val ring = MinimapCalibrationStore.current.value
+                    ?: MinimapCalibrationStore.load(this@CaptureService, minOf(display.width(), display.height()))
+                val left = floor(ring.cx - ring.r).toInt()
+                val top = floor(ring.cy - ring.r).toInt()
+                val right = ceil(ring.cx + ring.r).toInt()
+                val bottom = ceil(ring.cy + ring.r).toInt()
+                val sameGeometry = display.width() == frame.width && display.height() == frame.height
+                val inside = left >= 0 && top >= 0 && right <= frame.width && bottom <= frame.height
+                val checked = markerWasShown && sameGeometry && inside
+                var count = 0
+                if (checked) {
+                    val region = IntArray((right - left) * (bottom - top))
+                    cleanBitmap.getPixels(region, 0, right - left, left, top, right - left, bottom - top)
+                    count = region.count { Color.red(it) > 180 && Color.blue(it) > 180 && Color.green(it) < 90 }
+                }
+                val note = when {
+                    !markerWasShown -> "Тестовая метка не включена"
+                    !sameGeometry -> "Кадр и экран имеют разную геометрию: нужна привязка координат"
+                    !inside -> "Калиброванное кольцо вне границ кадра"
+                    hideOverlay -> "Скрывалась только тестовая метка; остальные окна не проверены"
+                    else -> "Проверена область кольца; отсутствие метки не доказывает изоляцию захвата"
+                }
+                val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
+                val tag = if (hideOverlay) "hidden" else "normal"
+                val file = File(filesDir, "capture_${tag}_${stamp}_${UUID.randomUUID()}.png")
+                withContext(Dispatchers.IO) {
+                    val atomic = AtomicFile(file)
+                    val stream = atomic.startWrite()
+                    try {
+                        check(cleanBitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)) { "PNG encoding failed" }
+                        atomic.finishWrite(stream)
+                    } catch (e: Exception) {
+                        atomic.failWrite(stream)
+                        throw e
+                    }
+                }
+                ensureActive()
+                check(synchronized(imageLock) { generation == frame.generation }) { "Размер захвата изменился; повторите снимок" }
+                _latestResult.value = CaptureResult(
+                    timestamp = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date()),
+                    width = frame.width, height = frame.height, overlayLeaked = checked && count > 50,
+                    magentaPixelCount = count, captureMs = SystemClock.elapsedRealtime() - startMs,
+                    filePath = file.absolutePath, markerChecked = checked, markerCheckNote = note,
+                    hiddenRequested = hideOverlay, frameTimestampNs = frame.timestampNs
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                reportError("${e.javaClass.simpleName}: ${e.message}", SystemClock.elapsedRealtime() - startMs)
+            } finally {
+                if (markerHidden) withContext(NonCancellable) { OverlayService.setMarkerTemporaryVisibilityAwait(true) }
+                bitmap?.recycle()
+                snapshotBusy.set(false)
+            }
+        }
+    }
+
+    private fun reportError(message: String, durationMs: Long = 0) {
+        Log.e(TAG, message)
+        _latestResult.value = CaptureResult(
+            timestamp = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date()), width = 0, height = 0,
+            overlayLeaked = false, magentaPixelCount = 0, captureMs = durationMs, filePath = "", error = message
+        )
+    }
+
+    private fun stopCapture() {
+        if (stopping) return
+        stopping = true
+        _isRunning.value = false
+        mainHandler.removeCallbacksAndMessages(null)
+        snapshotJob?.cancel()
+        synchronized(imageLock) {
             virtualDisplay?.release()
             virtualDisplay = null
             imageReader?.close()
             imageReader = null
-            mediaProjection?.unregisterCallback(projectionCallback)
-            mediaProjection?.stop()
-            mediaProjection = null
-        } catch (_: Throwable) {
+            generation++
         }
-        _isRunning.value = false
-        try {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-        } catch (_: Throwable) {
-        }
+        val projection = mediaProjection
+        mediaProjection = null
+        projection?.unregisterCallback(projectionCallback)
+        projection?.stop()
+        stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
     override fun onDestroy() {
-        scope.cancel()
         stopCapture()
+        scope.cancel()
         super.onDestroy()
     }
 }
