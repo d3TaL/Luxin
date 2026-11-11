@@ -1,5 +1,6 @@
 # Local Python environment for recognition experiments
 .venv/
+__pycache__/
 
 # Raw game screenshots and screen recordings: contain the account UID, never commit
 photo/
