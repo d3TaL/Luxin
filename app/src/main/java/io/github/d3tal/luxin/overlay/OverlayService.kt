@@ -17,8 +17,11 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import io.github.d3tal.luxin.capture.CaptureService
+import io.github.d3tal.luxin.tracker.LiveTrackingStatus
+import io.github.d3tal.luxin.tracker.formatTrackingHud
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -218,6 +221,19 @@ class OverlayService : Service() {
         }
         stepButton = stepBtn
 
+        val trackingText = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            maxWidth = 850
+            setPadding(8, 4, 8, 8)
+            text = formatTrackingHud(LiveTrackingStatus.state.value)
+        }
+        val trackButton = hudButton("▶ Трекер") {
+            if (LiveTrackingStatus.state.value.enabled) CaptureService.stopTracking(this)
+            else CaptureService.startTracking(this)
+        }
+        trackButton.isEnabled = CaptureService.isRunning.value
+
         val snapButton = hudButton("📸 Снимок (обычный)") {
             CaptureService.takeSnapshot(this, hideOverlayDuringCapture = false)
         }
@@ -242,6 +258,8 @@ class OverlayService : Service() {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.argb(210, 24, 24, 28))
             setPadding(16, 12, 16, 12)
+            addView(trackingText)
+            addView(trackButton)
             addView(statusText)
             addView(calText)
             addView(hudButton("Настроить кольцо / Готово") {
@@ -251,13 +269,31 @@ class OverlayService : Service() {
             addView(snapButton)
             addView(cleanSnapButton)
         }
-        controlHudView = hud
+        val scroll = object : ScrollView(this) {
+            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                val limit = (wm.maximumWindowMetrics.bounds.height() - 200).coerceAtLeast(200)
+                val available = MeasureSpec.getSize(heightMeasureSpec).takeIf { it > 0 } ?: limit
+                super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(minOf(limit, available), MeasureSpec.AT_MOST))
+            }
+        }.apply { addView(hud) }
+        controlHudView = scroll
 
         try {
             wm.addView(marker, params)
-            wm.addView(hud, hudParams)
+            wm.addView(scroll, hudParams)
             _isShowing.value = true
 
+            scope.launch {
+                LiveTrackingStatus.state.collect { s ->
+                    trackingText.text = formatTrackingHud(s)
+                    trackingText.setTextColor(if (s.status == "error") Color.rgb(255, 110, 110) else Color.WHITE)
+                    trackButton.text = if (s.enabled) "■ Остановить трекер" else "▶ Трекер"
+                    trackButton.isEnabled = CaptureService.isRunning.value
+                }
+            }
+            scope.launch {
+                CaptureService.isRunning.collect { trackButton.isEnabled = it }
+            }
             scope.launch {
                 CaptureService.latestResult.collect { res ->
                     if (res != null) {

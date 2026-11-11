@@ -25,6 +25,13 @@ import android.util.Log
 import android.view.WindowManager
 import io.github.d3tal.luxin.overlay.MinimapCalibrationStore
 import io.github.d3tal.luxin.overlay.OverlayService
+import io.github.d3tal.luxin.overlay.RingCalibration
+import io.github.d3tal.luxin.tracker.LiveTrackingState
+import io.github.d3tal.luxin.tracker.LiveTrackingStatus
+import io.github.d3tal.luxin.tracker.NativeSplitTracker
+import io.github.d3tal.luxin.tracker.PlayerArrowSignal
+import io.github.d3tal.luxin.tracker.ReferencePackStore
+import io.github.d3tal.luxin.tracker.TrackingFrameDecoder
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -80,9 +87,22 @@ class CaptureService : Service() {
     private var generation = 0L
     private var stopping = false
     private var receivedContentSize = false
+    @Volatile private var capturedContentVisible = true
+    private var trackingJob: Job? = null
+    // Epoch and status publications are confined to Main, preventing late native results after Stop.
+    private var trackingEpoch = 0L
 
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() = stopCapture()
+
+        override fun onCapturedContentVisibilityChanged(isVisible: Boolean) {
+            capturedContentVisible = isVisible
+            val previous = LiveTrackingStatus.state.value
+            if (!isVisible && previous.enabled) {
+                LiveTrackingStatus.publish(LiveTrackingState(enabled = true, status = "paused",
+                    message = "Захватываемое приложение не видно", packTitle = previous.packTitle))
+            }
+        }
 
         override fun onCapturedContentResize(width: Int, height: Int) {
             if (stopping || mediaProjection == null) return
@@ -101,6 +121,8 @@ class CaptureService : Service() {
         const val ACTION_START = "io.github.d3tal.luxin.capture.ACTION_START"
         const val ACTION_STOP = "io.github.d3tal.luxin.capture.ACTION_STOP"
         const val ACTION_TAKE_SNAPSHOT = "io.github.d3tal.luxin.capture.ACTION_TAKE_SNAPSHOT"
+        const val ACTION_TRACK_START = "io.github.d3tal.luxin.capture.ACTION_TRACK_START"
+        const val ACTION_TRACK_STOP = "io.github.d3tal.luxin.capture.ACTION_TRACK_STOP"
         const val EXTRA_RESULT_CODE = "extra_result_code"
         const val EXTRA_RESULT_DATA = "extra_result_data"
         const val EXTRA_HIDE_OVERLAY = "extra_hide_overlay"
@@ -121,6 +143,14 @@ class CaptureService : Service() {
 
         fun stop(context: Context) {
             context.startService(Intent(context, CaptureService::class.java).apply { action = ACTION_STOP })
+        }
+
+        fun startTracking(context: Context) {
+            context.startService(Intent(context, CaptureService::class.java).apply { action = ACTION_TRACK_START })
+        }
+
+        fun stopTracking(context: Context) {
+            context.startService(Intent(context, CaptureService::class.java).apply { action = ACTION_TRACK_STOP })
         }
 
         fun takeSnapshot(context: Context, hideOverlayDuringCapture: Boolean = false) {
@@ -151,6 +181,16 @@ class CaptureService : Service() {
                 }
             }
             ACTION_STOP -> stopCapture()
+            ACTION_TRACK_START -> {
+                if (_isRunning.value) startLiveTracking() else {
+                    LiveTrackingStatus.publish(LiveTrackingState(status = "error", message = "Сначала запустите захват экрана"))
+                    stopSelf()
+                }
+            }
+            ACTION_TRACK_STOP -> {
+                stopLiveTracking()
+                if (!_isRunning.value) stopSelf()
+            }
             ACTION_TAKE_SNAPSHOT -> {
                 if (_isRunning.value) captureFrame(intent.getBooleanExtra(EXTRA_HIDE_OVERLAY, false)) else {
                     reportError("Сначала запустите захват экрана")
@@ -166,6 +206,7 @@ class CaptureService : Service() {
         if (mediaProjection != null) return // Never reuse one consent token to create a second display.
         stopping = false
         receivedContentSize = false
+        capturedContentVisible = true
         try {
             val notification = Notification.Builder(this, CHANNEL)
                 .setContentTitle("Luxin Capture Active")
@@ -345,6 +386,165 @@ class CaptureService : Service() {
         }
     }
 
+    private fun startLiveTracking() {
+        if (trackingJob?.isActive == true) return
+        val epoch = ++trackingEpoch
+        LiveTrackingStatus.publish(LiveTrackingState(enabled = true, status = "loading", message = "Загрузка эталонов…"))
+        trackingJob = scope.launch {
+            var native: NativeSplitTracker? = null
+            try {
+                val pack = withContext(Dispatchers.IO) { ReferencePackStore.loadInstalled(this@CaptureService) }
+                    ?: error("Импортируйте ZIP-набор эталонов на экране Luxin")
+                val engine = NativeSplitTracker()
+                native = engine
+                for ((index, layer) in pack.manifest.layers.withIndex()) {
+                    ensureActive()
+                    publishLive(epoch, LiveTrackingState(enabled = true, status = "loading", packTitle = pack.manifest.title,
+                        message = "Эталон ${index + 1}/${pack.manifest.layers.size}: ${layer.name}"))
+                    check(engine.addLayerReference(layer.name, layer.space, layer.id,
+                        File(pack.directory, layer.image).absolutePath,
+                        File(pack.directory, layer.activeMask).absolutePath,
+                        File(pack.directory, layer.contextMask).absolutePath,
+                        layer.unitsPerPx, layer.originX, layer.originY)) { "Не удалось загрузить эталон ${layer.name}" }
+                }
+                val names = pack.manifest.layers.associate { "${it.space}/${it.id}" to it.name }
+                var lastTimestamp = 0L
+                var lastGeneration = -1L
+                var previousProcessMs = 0L
+                var displayShortSide = -1
+                var paused = true
+                suspend fun waiting(message: String, width: Int = 0, height: Int = 0) {
+                    if (!paused) engine.reset()
+                    paused = true
+                    previousProcessMs = 0
+                    publishLive(epoch, LiveTrackingState(enabled = true, status = "paused", message = message,
+                        packTitle = pack.manifest.title, frameWidth = width, frameHeight = height))
+                }
+                while (_isRunning.value) {
+                    ensureActive()
+                    val loopStart = SystemClock.elapsedRealtime()
+                    if (!capturedContentVisible || snapshotBusy.get()) {
+                        waiting(if (!capturedContentVisible) "Захватываемое приложение не видно" else "Пауза: ручной снимок")
+                        delay(100)
+                        continue
+                    }
+                    val frame = readFreshPixels(lastTimestamp)
+                    if (frame == null) {
+                        waiting("Ожидание нового кадра")
+                        delay(100)
+                        continue
+                    }
+                    lastTimestamp = frame.timestampNs
+                    val ageNs = System.nanoTime() - frame.timestampNs
+                    if (ageNs > 1_000_000_000L) {
+                        waiting("Кадр устарел; ожидаю обновление", frame.width, frame.height)
+                        delay(100)
+                        continue
+                    }
+                    val bounds = requireNotNull(getSystemService(WindowManager::class.java)).maximumWindowMetrics.bounds
+                    val shortSide = minOf(bounds.width(), bounds.height())
+                    val displayAspect = maxOf(bounds.width(), bounds.height()).toDouble() / shortSide
+                    if (frame.width <= frame.height || kotlin.math.abs(frame.width.toDouble() / frame.height - displayAspect) > 0.04) {
+                        waiting("Нужна полноэкранная альбомная игра без чёрных полей", frame.width, frame.height)
+                        delay(250)
+                        continue
+                    }
+                    if (displayShortSide != shortSide) {
+                        MinimapCalibrationStore.load(this@CaptureService, shortSide)
+                        displayShortSide = shortSide
+                    }
+                    val screenRing = MinimapCalibrationStore.current.value ?: RingCalibration.defaultFor(shortSide)
+                    // This spike supports a full-screen landscape game with uniform downscaling.
+                    // Aspect checking is not a general crop/inset-origin detector; windowed capture is untested.
+                    val k = frame.height.toFloat() / shortSide
+                    val ring = RingCalibration(screenRing.cx * k, screenRing.cy * k, screenRing.r * k)
+                    val bitmap = Bitmap.createBitmap(frame.width, frame.height, Bitmap.Config.ARGB_8888)
+                    try {
+                        bitmap.copyPixelsFromBuffer(frame.bytes)
+                        val a = (26f * frame.height / 1440f).toInt().coerceAtLeast(2)
+                        val x = ring.cx.toInt() - a
+                        val y = ring.cy.toInt() - a
+                        val side = 2 * a + 1
+                        if (x < 0 || y < 0 || x + side > frame.width || y + side > frame.height) {
+                            waiting("Калибровка вне границ кадра", frame.width, frame.height)
+                            delay(250)
+                            continue
+                        }
+                        val arrow = IntArray(side * side)
+                        bitmap.getPixels(arrow, 0, side, x, y, side, side)
+                        if (!PlayerArrowSignal.present(arrow, frame.height)) {
+                            waiting("Миникарта скрыта или стрелка игрока не найдена", frame.width, frame.height)
+                            delay(250)
+                            continue
+                        }
+                        if (lastGeneration != frame.generation) {
+                            engine.reset()
+                            lastGeneration = frame.generation
+                        }
+                        paused = false
+                        val startNative = SystemClock.elapsedRealtime()
+                        val raw = engine.updateFrameJson(bitmap, frame.timestampNs / 1_000_000_000.0,
+                            ringXyr = floatArrayOf(ring.cx, ring.cy, ring.r))
+                        val nativeMs = SystemClock.elapsedRealtime() - startNative
+                        ensureActive()
+                        if (synchronized(imageLock) { generation != frame.generation }) {
+                            waiting("Размер кадра изменился", frame.width, frame.height)
+                            continue
+                        }
+                        val decoded = TrackingFrameDecoder.decode(raw, pack.manifest.mode == "position_only")
+                        val fps = if (previousProcessMs > 0 && loopStart > previousProcessMs)
+                            1000.0 / (loopStart - previousProcessMs) else null
+                        previousProcessMs = loopStart
+                        val position = decoded.position
+                        Log.d(TAG, "Live ${frame.width}x${frame.height} pos=${decoded.positionMode} " +
+                            "x=${position?.x} y=${position?.y} layer=${decoded.layer ?: "unknown"} nativeMs=$nativeMs")
+                        publishLive(epoch, LiveTrackingState(enabled = true,
+                            status = if (position != null) "tracking" else "searching",
+                            message = when {
+                                position != null -> "Позиция найдена"
+                                decoded.positionMode == "pending" -> "Подтверждение позиции"
+                                decoded.positionMode == "ambiguous" -> "Неоднозначная позиция"
+                                else -> "Поиск в выбранном наборе"
+                            }, packTitle = pack.manifest.title, frameWidth = frame.width, frameHeight = frame.height,
+                            position = position, positionMode = decoded.positionMode, layer = decoded.layer,
+                            layerName = decoded.layer?.let { names["${position?.space}/$it"] ?: it },
+                            layerMode = decoded.layerMode, inliers = decoded.inliers, nativeMs = nativeMs,
+                            frameAgeMs = if (ageNs >= 0) ageNs / 1_000_000 else null, actualFps = fps))
+                    } finally {
+                        bitmap.recycle()
+                    }
+                    delay((500 - (SystemClock.elapsedRealtime() - loopStart)).coerceAtLeast(0))
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Live tracker failed", e)
+                publishLive(epoch, LiveTrackingState(status = "error", message = e.message ?: e.javaClass.simpleName))
+            } catch (e: LinkageError) {
+                Log.e(TAG, "Native library unavailable", e)
+                publishLive(epoch, LiveTrackingState(status = "error", message = "Нативная библиотека недоступна: ${e.message}"))
+            } finally {
+                native?.close()
+            }
+        }
+    }
+
+    private suspend fun publishLive(epoch: Long, state: LiveTrackingState) = withContext(Dispatchers.Main.immediate) {
+        if (trackingEpoch == epoch) {
+            val blocked = state.enabled && state.status != "loading" && (!capturedContentVisible || snapshotBusy.get())
+            LiveTrackingStatus.publish(if (blocked) LiveTrackingState(enabled = true, status = "paused",
+                message = if (!capturedContentVisible) "Захватываемое приложение не видно" else "Пауза: ручной снимок",
+                packTitle = state.packTitle) else state)
+        }
+    }
+
+    private fun stopLiveTracking() {
+        trackingEpoch++
+        trackingJob?.cancel()
+        trackingJob = null
+        LiveTrackingStatus.publish(LiveTrackingState())
+    }
+
     private fun reportError(message: String, durationMs: Long = 0) {
         Log.e(TAG, message)
         _latestResult.value = CaptureResult(
@@ -357,6 +557,7 @@ class CaptureService : Service() {
         if (stopping) return
         stopping = true
         _isRunning.value = false
+        stopLiveTracking()
         mainHandler.removeCallbacksAndMessages(null)
         snapshotJob?.cancel()
         synchronized(imageLock) {

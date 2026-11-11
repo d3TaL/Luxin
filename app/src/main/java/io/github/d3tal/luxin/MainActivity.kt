@@ -71,8 +71,14 @@ import io.github.d3tal.luxin.capture.CaptureService
 import io.github.d3tal.luxin.data.KongyingSyncManager
 import io.github.d3tal.luxin.overlay.OverlayService
 import io.github.d3tal.luxin.tracker.NativeSplitTracker
+import io.github.d3tal.luxin.tracker.ReferencePackStore
+import io.github.d3tal.luxin.tracker.LiveTrackingStatus
+import io.github.d3tal.luxin.tracker.formatTrackingHud
 import io.github.d3tal.luxin.ui.theme.LuxinTheme
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
 
@@ -112,6 +118,31 @@ fun CaptureSpikeScreen() {
 
     var nativeJniStatus by remember { mutableStateOf("Не проверено") }
     var isSyncing by remember { mutableStateOf(false) }
+    var isImportingPack by remember { mutableStateOf(false) }
+    var packSummary by remember { mutableStateOf("Эталоны не импортированы") }
+    var packError by remember { mutableStateOf<String?>(null) }
+    val liveTracking by LiveTrackingStatus.state.collectAsStateWithLifecycle()
+
+    val referencePackLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null && LiveTrackingStatus.state.value.enabled) {
+            packError = "Сначала остановите трекер перед сменой набора"
+        } else if (uri != null) {
+            isImportingPack = true
+            packError = null
+            scope.launch {
+                try {
+                    val pack = ReferencePackStore.importPack(context.applicationContext, uri)
+                    packSummary = "${pack.manifest.title} — эталонов: ${pack.manifest.layers.size}"
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    packError = e.message ?: "Не удалось импортировать набор"
+                } finally {
+                    isImportingPack = false
+                }
+            }
+        }
+    }
 
     val isOverlayActive by OverlayService.isShowing.collectAsStateWithLifecycle()
     val isCaptureActive by CaptureService.isRunning.collectAsStateWithLifecycle()
@@ -138,6 +169,15 @@ fun CaptureSpikeScreen() {
     }
 
     LaunchedEffect(Unit) {
+        val installed = try {
+            withContext(Dispatchers.IO) { ReferencePackStore.loadInstalled(context.applicationContext) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            packError = "Проверка сохранённых эталонов: ${e.message}"
+            null
+        }
+        if (installed != null) packSummary = "${installed.manifest.title} — эталонов: ${installed.manifest.layers.size}"
         hasOverlayPermission = Settings.canDrawOverlays(context)
         if (!hasNotificationPermission && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -251,6 +291,30 @@ fun CaptureSpikeScreen() {
                 ) {
                     Text(if (isSyncing) "Загрузка из Kongying..." else "Синхронизировать базу Kongying")
                 }
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Живой трекер — диагностика", style = MaterialTheme.typography.titleMedium)
+                Text(packSummary, style = MaterialTheme.typography.bodyMedium)
+                Text("Импортируйте ZIP с эталонами нужной области. Набор ограничен этой областью, не всем Тейватом. " +
+                    "Для первого теста выберите захват одного приложения Genshin. Метки предметов пока не рисуются.",
+                    style = MaterialTheme.typography.bodySmall)
+                packError?.let { Text(it, color = Color(0xFFF44336)) }
+                OutlinedButton(onClick = {
+                    referencePackLauncher.launch(arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream"))
+                }, enabled = !isImportingPack && !liveTracking.enabled, modifier = Modifier.fillMaxWidth()) {
+                    Text(if (isImportingPack) "Импорт эталонов…" else "Импортировать ZIP эталонов")
+                }
+                Button(onClick = {
+                    if (liveTracking.enabled) CaptureService.stopTracking(context)
+                    else CaptureService.startTracking(context)
+                }, enabled = isCaptureActive && !isImportingPack, modifier = Modifier.fillMaxWidth()) {
+                    Text(if (liveTracking.enabled) "Остановить трекер" else "Запустить трекер (2 кадра/с)")
+                }
+                Text(formatTrackingHud(liveTracking), fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall)
             }
         }
 
