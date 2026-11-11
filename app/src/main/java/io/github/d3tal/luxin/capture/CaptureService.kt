@@ -16,13 +16,18 @@ import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import io.github.d3tal.luxin.overlay.OverlayService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -39,6 +44,7 @@ data class CaptureResult(
     val height: Int,
     val overlayLeaked: Boolean,
     val magentaPixelCount: Int,
+    val captureMs: Long,
     val filePath: String,
     val error: String? = null
 )
@@ -46,10 +52,17 @@ data class CaptureResult(
 class CaptureService : Service() {
 
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
+
+    private val projectionCallback = object : MediaProjection.Callback() {
+        override fun onStop() {
+            stopCapture()
+        }
+    }
 
     companion object {
         const val ACTION_START = "io.github.d3tal.luxin.capture.ACTION_START"
@@ -58,6 +71,7 @@ class CaptureService : Service() {
 
         const val EXTRA_RESULT_CODE = "extra_result_code"
         const val EXTRA_RESULT_DATA = "extra_result_data"
+        const val EXTRA_HIDE_OVERLAY = "extra_hide_overlay"
 
         private const val NOTIFICATION_CHANNEL_ID = "luxin_capture_channel"
         private const val NOTIFICATION_ID = 1001
@@ -87,9 +101,10 @@ class CaptureService : Service() {
             })
         }
 
-        fun takeSnapshot(context: Context) {
+        fun takeSnapshot(context: Context, hideOverlayDuringCapture: Boolean = false) {
             context.startService(Intent(context, CaptureService::class.java).apply {
                 action = ACTION_TAKE_SNAPSHOT
+                putExtra(EXTRA_HIDE_OVERLAY, hideOverlayDuringCapture)
             })
         }
     }
@@ -117,7 +132,10 @@ class CaptureService : Service() {
                 }
             }
             ACTION_STOP -> stopCapture()
-            ACTION_TAKE_SNAPSHOT -> captureFrame()
+            ACTION_TAKE_SNAPSHOT -> {
+                val hideOverlay = intent.getBooleanExtra(EXTRA_HIDE_OVERLAY, false)
+                captureFrame(hideOverlay)
+            }
         }
         return START_NOT_STICKY
     }
@@ -145,30 +163,59 @@ class CaptureService : Service() {
         }
         return builder
             .setContentTitle("Luxin Capture Active")
-            .setContentText("Screen capture is active. Tap app to inspect frames.")
+            .setContentText("Захват экрана активен. Используйте кнопку HUD поверх игры.")
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .build()
     }
 
     private fun startCapture(resultCode: Int, data: Intent) {
-        val notification = buildNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+        try {
+            val notification = buildNotification()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+
+            val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            val projection = projectionManager.getMediaProjection(resultCode, data) ?: run {
+                _isRunning.value = false
+                return
+            }
+
+            // Required on Android 14+ (targetSdk 34+) before createVirtualDisplay
+            projection.registerCallback(projectionCallback, mainHandler)
+            mediaProjection = projection
+
+            recreateVirtualDisplay()
+            _isRunning.value = true
+
+            scope.launch {
+                delay(800)
+                captureFrame(hideOverlay = false)
+            }
+        } catch (e: Throwable) {
+            e.printStackTrace()
+            _latestResult.value = CaptureResult(
+                timestamp = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date()),
+                width = 0,
+                height = 0,
+                overlayLeaked = false,
+                magentaPixelCount = 0,
+                captureMs = 0,
+                filePath = "",
+                error = "${e.javaClass.simpleName}: ${e.message}"
             )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+            stopCapture()
         }
+    }
 
-        val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        val projection = projectionManager.getMediaProjection(resultCode, data) ?: run {
-            _isRunning.value = false
-            return
-        }
-        mediaProjection = projection
-
+    private fun recreateVirtualDisplay() {
+        val projection = mediaProjection ?: return
         val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         val metrics = DisplayMetrics()
         @Suppress("DEPRECATION")
@@ -177,6 +224,9 @@ class CaptureService : Service() {
         val width = metrics.widthPixels
         val height = metrics.heightPixels
         val dpi = metrics.densityDpi
+
+        virtualDisplay?.release()
+        imageReader?.close()
 
         imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
         virtualDisplay = projection.createVirtualDisplay(
@@ -187,23 +237,35 @@ class CaptureService : Service() {
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             imageReader?.surface,
             null,
-            null
+            mainHandler
         )
-
-        _isRunning.value = true
-
-        // Capture initial frame after short delay for virtual display to initialize
-        scope.launch {
-            kotlinx.coroutines.delay(1000)
-            captureFrame()
-        }
     }
 
-    private fun captureFrame() {
-        val reader = imageReader ?: return
+    private fun captureFrame(hideOverlay: Boolean = false) {
         scope.launch {
+            val t0 = SystemClock.elapsedRealtime()
             try {
-                val image = reader.acquireLatestImage()
+                if (hideOverlay) {
+                    OverlayService.setMarkerTemporaryVisibility(false)
+                    delay(45) // Wait ~2-3 display frames at 60/120Hz for compositor to clear overlay
+                }
+
+                val reader = imageReader ?: run {
+                    if (hideOverlay) OverlayService.setMarkerTemporaryVisibility(true)
+                    return@launch
+                }
+
+                // Drain older buffered frame if present so we inspect the freshest frame
+                var image = reader.acquireLatestImage()
+                if (image == null) {
+                    delay(50)
+                    image = reader.acquireLatestImage()
+                }
+
+                if (hideOverlay) {
+                    OverlayService.setMarkerTemporaryVisibility(true)
+                }
+
                 if (image == null) {
                     _latestResult.value = CaptureResult(
                         timestamp = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date()),
@@ -211,8 +273,9 @@ class CaptureService : Service() {
                         height = 0,
                         overlayLeaked = false,
                         magentaPixelCount = 0,
+                        captureMs = SystemClock.elapsedRealtime() - t0,
                         filePath = "",
-                        error = "Кадр не готов (image == null). Убедитесь, что экран активен."
+                        error = "Кадр не обновился (image == null). Подвигайте экран и повторите."
                     )
                     return@launch
                 }
@@ -239,16 +302,10 @@ class CaptureService : Service() {
                     Bitmap.createBitmap(bitmap, 0, 0, width, height)
                 }
 
-                // Check for test overlay leakage: inspect top-left minimap region [x: 100..450, y: 10..360]
-                // The overlay draws bright magenta Color.rgb(255, 0, 255)
+                // Check for test overlay leakage: inspect top-left minimap region [x: 100..470, y: 10..360]
                 var magentaCount = 0
-                val targetColor = OverlayService.TEST_MARKER_COLOR
-                val tr = Color.red(targetColor)
-                val tg = Color.green(targetColor)
-                val tb = Color.blue(targetColor)
-
                 val xStart = 100.coerceAtMost(width - 1)
-                val xEnd = 450.coerceAtMost(width)
+                val xEnd = 470.coerceAtMost(width)
                 val yStart = 10.coerceAtMost(height - 1)
                 val yEnd = 360.coerceAtMost(height)
 
@@ -258,16 +315,18 @@ class CaptureService : Service() {
                         val r = Color.red(px)
                         val g = Color.green(px)
                         val b = Color.blue(px)
-                        // Magenta check: high red and blue, low green
-                        if (r > 200 && b > 200 && g < 80) {
+                        if (r > 180 && b > 180 && g < 90) {
                             magentaCount++
                         }
                     }
                 }
 
-                // Save captured frame to app files directory for user inspection
+                val captureMs = SystemClock.elapsedRealtime() - t0
+
+                // Save captured frame to app files directory for inspection
                 val timeStr = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-                val outFile = File(filesDir, "capture_$timeStr.png")
+                val modeTag = if (hideOverlay) "hidden" else "normal"
+                val outFile = File(filesDir, "capture_${modeTag}_$timeStr.png")
                 FileOutputStream(outFile).use { out ->
                     cleanBitmap.compress(Bitmap.CompressFormat.PNG, 90, out)
                 }
@@ -278,10 +337,14 @@ class CaptureService : Service() {
                     height = height,
                     overlayLeaked = magentaCount > 50,
                     magentaPixelCount = magentaCount,
+                    captureMs = captureMs,
                     filePath = outFile.absolutePath
                 )
 
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
+                if (hideOverlay) {
+                    OverlayService.setMarkerTemporaryVisibility(true)
+                }
                 e.printStackTrace()
                 _latestResult.value = CaptureResult(
                     timestamp = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date()),
@@ -289,26 +352,35 @@ class CaptureService : Service() {
                     height = 0,
                     overlayLeaked = false,
                     magentaPixelCount = 0,
+                    captureMs = SystemClock.elapsedRealtime() - t0,
                     filePath = "",
-                    error = "Ошибка захвата: ${e.message}"
+                    error = "${e.javaClass.simpleName}: ${e.message}"
                 )
             }
         }
     }
 
     private fun stopCapture() {
-        virtualDisplay?.release()
-        virtualDisplay = null
-        imageReader?.close()
-        imageReader = null
-        mediaProjection?.stop()
-        mediaProjection = null
+        try {
+            virtualDisplay?.release()
+            virtualDisplay = null
+            imageReader?.close()
+            imageReader = null
+            mediaProjection?.unregisterCallback(projectionCallback)
+            mediaProjection?.stop()
+            mediaProjection = null
+        } catch (_: Throwable) {
+        }
         _isRunning.value = false
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        try {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } catch (_: Throwable) {
+        }
         stopSelf()
     }
 
     override fun onDestroy() {
+        scope.cancel()
         stopCapture()
         super.onDestroy()
     }

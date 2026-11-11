@@ -310,12 +310,22 @@ fun CaptureSpikeScreen() {
                 Spacer(modifier = Modifier.height(8.dp))
 
                 Button(
-                    onClick = { CaptureService.takeSnapshot(context) },
+                    onClick = { CaptureService.takeSnapshot(context, hideOverlayDuringCapture = false) },
                     enabled = isCaptureActive,
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
                 ) {
-                    Text("Сделать тестовый снимок и проверить")
+                    Text("📸 Снимок (обычный)")
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                OutlinedButton(
+                    onClick = { CaptureService.takeSnapshot(context, hideOverlayDuringCapture = true) },
+                    enabled = isCaptureActive,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("✨ Снимок (скрыть оверлей на 1 кадр)")
                 }
 
                 if (captureResult != null) {
@@ -391,7 +401,7 @@ fun CaptureResultView(result: CaptureResult) {
             }
         } else {
             Text(
-                text = "Разрешение: ${result.width} × ${result.height}",
+                text = "Разрешение: ${result.width} × ${result.height} | Захват: ${result.captureMs} мс",
                 style = MaterialTheme.typography.bodyMedium
             )
 
