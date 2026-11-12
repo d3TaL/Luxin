@@ -30,6 +30,7 @@ import io.github.d3tal.luxin.tracker.LiveTrackingState
 import io.github.d3tal.luxin.tracker.LiveTrackingStatus
 import io.github.d3tal.luxin.tracker.NativeSplitTracker
 import io.github.d3tal.luxin.tracker.PlayerArrowSignal
+import io.github.d3tal.luxin.tracker.BigMapConfirmation
 import io.github.d3tal.luxin.tracker.ReferencePackStore
 import io.github.d3tal.luxin.tracker.TrackingFrameDecoder
 import kotlinx.coroutines.CancellationException
@@ -413,12 +414,14 @@ class CaptureService : Service() {
                 var previousProcessMs = 0L
                 var displayShortSide = -1
                 var paused = true
-                suspend fun waiting(message: String, width: Int = 0, height: Int = 0) {
+                val bigMap = BigMapConfirmation()
+                suspend fun waiting(message: String, width: Int = 0, height: Int = 0, screenMode: String = "unknown") {
+                    if (screenMode != "big_map" && screenMode != "big_map_pending") bigMap.reset()
                     if (!paused) engine.reset()
                     paused = true
                     previousProcessMs = 0
                     publishLive(epoch, LiveTrackingState(enabled = true, status = "paused", message = message,
-                        packTitle = pack.manifest.title, frameWidth = width, frameHeight = height))
+                        packTitle = pack.manifest.title, frameWidth = width, frameHeight = height, screenMode = screenMode))
                 }
                 while (_isRunning.value) {
                     ensureActive()
@@ -461,6 +464,23 @@ class CaptureService : Service() {
                     val bitmap = Bitmap.createBitmap(frame.width, frame.height, Bitmap.Config.ARGB_8888)
                     try {
                         bitmap.copyPixelsFromBuffer(frame.bytes)
+                        if (lastGeneration != frame.generation) {
+                            engine.reset()
+                            bigMap.reset()
+                            lastGeneration = frame.generation
+                        }
+                        val screenMode = bigMap.observe(engine.isBigMap(bitmap))
+                        ensureActive()
+                        if (synchronized(imageLock) { generation != frame.generation }) {
+                            waiting("Размер кадра изменился", frame.width, frame.height)
+                            continue
+                        }
+                        if (screenMode == "big_map" || screenMode == "big_map_pending") {
+                            waiting(if (screenMode == "big_map") "Открыта большая карта" else "Подтверждение большой карты",
+                                frame.width, frame.height, screenMode)
+                            delay((500 - (SystemClock.elapsedRealtime() - loopStart)).coerceAtLeast(0))
+                            continue
+                        }
                         val a = (26f * frame.height / 1440f).toInt().coerceAtLeast(2)
                         val x = ring.cx.toInt() - a
                         val y = ring.cy.toInt() - a
@@ -476,10 +496,6 @@ class CaptureService : Service() {
                             waiting("Миникарта скрыта или стрелка игрока не найдена", frame.width, frame.height)
                             delay(250)
                             continue
-                        }
-                        if (lastGeneration != frame.generation) {
-                            engine.reset()
-                            lastGeneration = frame.generation
                         }
                         paused = false
                         val startNative = SystemClock.elapsedRealtime()
@@ -509,7 +525,7 @@ class CaptureService : Service() {
                             position = position, positionMode = decoded.positionMode, layer = decoded.layer,
                             layerName = decoded.layer?.let { names["${position?.space}/$it"] ?: it },
                             layerMode = decoded.layerMode, inliers = decoded.inliers, nativeMs = nativeMs,
-                            frameAgeMs = if (ageNs >= 0) ageNs / 1_000_000 else null, actualFps = fps))
+                            frameAgeMs = if (ageNs >= 0) ageNs / 1_000_000 else null, actualFps = fps, screenMode = "minimap"))
                     } finally {
                         bitmap.recycle()
                     }

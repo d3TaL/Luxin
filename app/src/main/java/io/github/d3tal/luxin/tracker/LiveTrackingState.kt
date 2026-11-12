@@ -24,11 +24,18 @@ data class LiveTrackingState(
     val inliers: Int = 0,
     val nativeMs: Long? = null,
     val frameAgeMs: Long? = null,
-    val actualFps: Double? = null
+    val actualFps: Double? = null,
+    val screenMode: String = "unknown"
 )
 
 fun formatTrackingHud(s: LiveTrackingState): String = buildString {
     append(s.message)
+    append("\nЭкран: " + when (s.screenMode) {
+        "big_map" -> "большая карта"
+        "big_map_pending" -> "большая карта?"
+        "minimap" -> "миникарта"
+        else -> "не определён"
+    })
     if (s.packTitle.isNotBlank()) append("\n${s.packTitle}")
     s.position?.let {
         append(String.format(java.util.Locale.US, "\n%s: x %.1f  y %.1f  масштаб %.3f", it.space, it.x, it.y, it.scale))

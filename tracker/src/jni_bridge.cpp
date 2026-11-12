@@ -1,4 +1,5 @@
 #include "luxin/split_tracker.hpp"
+#include "luxin/bigmap_detector.hpp"
 
 #include <android/bitmap.h>
 #include <android/log.h>
@@ -81,6 +82,23 @@ std::string jstringToStd(JNIEnv* env, jstring jstr) {
 } // namespace
 
 extern "C" {
+
+JNIEXPORT jboolean JNICALL
+Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeIsBigMap(
+    JNIEnv* env, jobject /*thiz*/, jobject bitmap
+) {
+    try {
+        cv::Mat bgr;
+        if (!bitmapToBgrMat(env, bitmap, bgr)) {
+            env->ThrowNew(env->FindClass("java/lang/IllegalStateException"), "Cannot read scene bitmap");
+            return JNI_FALSE;
+        }
+        return luxin::detectBigMap(bgr).detected ? JNI_TRUE : JNI_FALSE;
+    } catch (const std::exception& e) {
+        env->ThrowNew(env->FindClass("java/lang/IllegalStateException"), e.what());
+        return JNI_FALSE;
+    }
+}
 
 JNIEXPORT jlong JNICALL
 Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeCreate(

@@ -32,6 +32,7 @@ endif()
 
 add_library(luxin_tracker STATIC
     src/split_tracker.cpp
+    src/bigmap_detector.cpp
 )
 
 target_include_directories(luxin_tracker
@@ -65,6 +66,10 @@ if(LUXIN_BUILD_TESTS AND NOT ANDROID)
     )
     target_link_libraries(test_split_tracker PRIVATE luxin_tracker)
     add_test(NAME test_split_tracker COMMAND test_split_tracker)
+
+    add_executable(test_bigmap_detector tests/test_bigmap_detector.cpp)
+    target_link_libraries(test_bigmap_detector PRIVATE luxin_tracker)
+    add_test(NAME test_bigmap_detector COMMAND test_bigmap_detector)
 
     add_executable(benchmark_frames
         tests/benchmark_frames.cpp

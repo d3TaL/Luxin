@@ -62,6 +62,11 @@ class NativeSplitTracker(unitScale: Double = 0.0) : Closeable {
         return nativeUpdateFrame(handle, frameBitmap, timestampSeconds, excludedCirclesXyr, ring)
     }
 
+    /** Cheap UI-only gate, before minimap matching; independent of loaded reference packs. */
+    fun isBigMap(frameBitmap: Bitmap): Boolean = nativeIsBigMap(frameBitmap)
+
+    private external fun nativeIsBigMap(frameBitmap: Bitmap): Boolean
+
     fun runSelfTest(): String = nativeRunSelfTest()
 
     @Synchronized
