@@ -7,6 +7,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.PixelFormat
+import android.graphics.Typeface
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -254,10 +255,30 @@ class OverlayService : Service() {
                 hudButton("R +") { adjust(0f, 0f, 1f) }, stepBtn))
             addView(hudButton("Сброс калибровки") { resetCalibration() })
         }
-        val hud = LinearLayout(this).apply {
+
+        var isCollapsed = false
+
+        val headerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        val collapsedSummaryText = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setTypeface(null, Typeface.BOLD)
+            setPadding(4, 4, 8, 4)
+            visibility = View.GONE
+            text = "Luxin HUD"
+        }
+
+        val toggleCollapseButton = hudButton("▾ Свернуть") { }
+
+        headerRow.addView(collapsedSummaryText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        headerRow.addView(toggleCollapseButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        val controlsContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.argb(210, 24, 24, 28))
-            setPadding(16, 12, 16, 12)
             addView(trackingText)
             addView(trackButton)
             addView(statusText)
@@ -268,6 +289,27 @@ class OverlayService : Service() {
             addView(calibrationPanel)
             addView(snapButton)
             addView(cleanSnapButton)
+        }
+
+        toggleCollapseButton.setOnClickListener {
+            isCollapsed = !isCollapsed
+            if (isCollapsed) {
+                controlsContainer.visibility = View.GONE
+                collapsedSummaryText.visibility = View.VISIBLE
+                toggleCollapseButton.text = "▸ Развернуть"
+            } else {
+                controlsContainer.visibility = View.VISIBLE
+                collapsedSummaryText.visibility = View.GONE
+                toggleCollapseButton.text = "▾ Свернуть"
+            }
+        }
+
+        val hud = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.argb(210, 24, 24, 28))
+            setPadding(14, 10, 14, 10)
+            addView(headerRow)
+            addView(controlsContainer)
         }
         val scroll = object : ScrollView(this) {
             override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -289,6 +331,15 @@ class OverlayService : Service() {
                     trackingText.setTextColor(if (s.status == "error") Color.rgb(255, 110, 110) else Color.WHITE)
                     trackButton.text = if (s.enabled) "■ Остановить трекер" else "▶ Трекер"
                     trackButton.isEnabled = CaptureService.isRunning.value
+
+                    val layerStr = s.layerName ?: s.layer ?: ""
+                    val posStr = if (s.position != null) "(${s.position.x.toInt()}, ${s.position.y.toInt()})" else ""
+                    collapsedSummaryText.text = when {
+                        !s.enabled -> "Трекер: выкл"
+                        s.position != null && layerStr.isNotBlank() -> "$layerStr $posStr"
+                        s.position != null -> "${s.position.space} $posStr"
+                        else -> s.message
+                    }
                 }
             }
             scope.launch {
