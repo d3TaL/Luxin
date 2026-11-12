@@ -211,10 +211,20 @@ void testFullSiftSplitTrackerEndToEnd() {
     cv::Mat img_a = makeFloorImg(true);
     cv::Mat img_b = makeFloorImg(false);
 
+    // Distinct texture for distant location
+    cv::Mat img_distant(360, 360, CV_8UC1);
+    for (int y = 0; y < 360; ++y) {
+        for (int x = 0; x < 360; ++x) {
+            img_distant.at<uchar>(y, x) = static_cast<uchar>((x * 13 + y * 17) % 256);
+        }
+    }
+
     auto ref_a = std::make_shared<LayerReference>("ug1", "twt702", "UG1", img_a, mask_a, ctx, 1.0, 1000.0, -2000.0);
     auto ref_b = std::make_shared<LayerReference>("ug2", "twt702", "UG2", img_b, mask_b, ctx, 1.0, 1000.0, -2000.0);
+    // Add a distant third location model (e.g. 9000 units away) with distinct texture
+    auto ref_distant = std::make_shared<LayerReference>("distant", "twt702", "DISTANT_FLOOR", img_distant, mask_a, ctx, 1.0, 10000.0, -20000.0);
 
-    SplitTracker tracker({ref_a, ref_b}, 0.5625);
+    SplitTracker tracker({ref_a, ref_b, ref_distant}, 0.5625);
 
     cv::Mat crop_gray = img_a(cv::Rect(90, 90, 180, 180)).clone();
     // Simulate a drawn marker icon at (50, 50) in the crop, and exclude it via MaskCircle

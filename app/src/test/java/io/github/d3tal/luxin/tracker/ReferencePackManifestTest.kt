@@ -27,6 +27,7 @@ class ReferencePackManifestTest {
         assertEquals(referenceManifest(), manifest)
         assertEquals(manifest, ReferencePackRules.decode(ReferencePackRules.encode(manifest)))
         ReferencePackRules.validate(manifest.copy(mode = "position_only"))
+        ReferencePackRules.validate(manifest.copy(mode = "composite"))
     }
 
     @Test fun unknownFieldsAndUnsupportedSchemaAreRejected() {
@@ -48,10 +49,10 @@ class ReferencePackManifestTest {
         val manifest = referenceManifest()
         val layer = manifest.layers.single()
         rejects(manifest.copy(layers = emptyList()))
-        rejects(manifest.copy(layers = List(9) { layer.copy(id = "$it") }))
+        rejects(manifest.copy(layers = List(25) { layer.copy(id = "$it") }))
         rejects(manifest.copy(layers = listOf(layer, layer)))
         ReferencePackRules.validate(manifest.copy(layers = listOf(layer, layer.copy(space = "other"))))
-        ReferencePackRules.validate(manifest.copy(layers = List(8) { layer.copy(id = "$it") }))
+        ReferencePackRules.validate(manifest.copy(layers = List(24) { layer.copy(id = "$it") }))
     }
 
     @Test fun numbersMustBeFiniteAndScalePositive() {
@@ -101,9 +102,9 @@ class ReferencePackManifestTest {
     @Test fun totalPixelsCountLayersEvenWhenTheyShareFiles() {
         val manifest = referenceManifest()
         val layer = manifest.layers.single()
-        ReferencePackRules.validateDimensions(manifest.copy(layers = List(4) { layer.copy(id = "$it") })) { 2000 to 2000 }
+        ReferencePackRules.validateDimensions(manifest.copy(layers = List(8) { layer.copy(id = "$it") })) { 2000 to 2000 }
         assertThrows(IllegalArgumentException::class.java) {
-            ReferencePackRules.validateDimensions(manifest.copy(layers = List(5) { layer.copy(id = "$it") })) { 2000 to 2000 }
+            ReferencePackRules.validateDimensions(manifest.copy(layers = List(9) { layer.copy(id = "$it") })) { 2000 to 2000 }
         }
     }
 }

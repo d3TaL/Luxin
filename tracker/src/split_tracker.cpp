@@ -668,12 +668,25 @@ LayerDecision classifyLayer(
     std::vector<std::shared_ptr<LayerReference>> available;
     for (const auto& m : models) {
         if (m->space() == fix.space) {
-            available.push_back(m);
+            const double mx0 = m->originX();
+            const double my0 = m->originY();
+            const double mx1 = mx0 + m->gray().cols * m->unitsPerPx();
+            const double my1 = my0 + m->gray().rows * m->unitsPerPx();
+            if (fix.x >= mx0 && fix.x <= mx1 && fix.y >= my0 && fix.y <= my1) {
+                available.push_back(m);
+            }
         }
     }
     if (available.empty()) {
         LayerDecision d;
-        d.reason = "no models for position space";
+        d.reason = "no models for position coordinates";
+        return d;
+    }
+    if (available.size() == 1) {
+        LayerDecision d;
+        d.layer = available[0]->layer();
+        d.mode = "known";
+        d.reason = "single layer for position";
         return d;
     }
 
@@ -791,8 +804,18 @@ TrackingStepResult SplitTracker::update(const MinimapCrop& mm, double timestamp_
 
     std::vector<PositionFix> positions;
     for (const auto& model : models_) {
-        if (has_hint_ && model->space() != hint_.space) {
-            continue;
+        if (has_hint_) {
+            if (model->space() != hint_.space) {
+                continue;
+            }
+            const double pad = radius + 200.0;
+            const double mx0 = model->originX() - pad;
+            const double my0 = model->originY() - pad;
+            const double mx1 = model->originX() + model->gray().cols * model->unitsPerPx() + pad;
+            const double my1 = model->originY() + model->gray().rows * model->unitsPerPx() + pad;
+            if (hint_.x < mx0 || hint_.x > mx1 || hint_.y < my0 || hint_.y > my1) {
+                continue;
+            }
         }
         const PositionFix* hint_ptr = has_hint_ ? &hint_ : nullptr;
         Registration reg;

@@ -19,11 +19,11 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--id", required=True)
     ap.add_argument("--title", required=True)
-    ap.add_argument("--mode", choices=("layered", "position_only"), required=True)
+    ap.add_argument("--mode", choices=("layered", "position_only", "composite"), required=True)
     ap.add_argument("--ref", action="append", required=True)
     args = ap.parse_args()
-    if not 1 <= len(args.ref) <= 8:
-        ap.error("need 1..8 references")
+    if not 1 <= len(args.ref) <= 24:
+        ap.error("need 1..24 references")
     if args.mode == "position_only" and len(args.ref) != 1:
         ap.error("position-only pack currently contains one surface reference")
     manifest = dict(schemaVersion=1, id=args.id, title=args.title, mode=args.mode, layers=[])
@@ -38,16 +38,18 @@ def main():
             ap.error("cannot decode reference image")
         h, w = image.shape
         total_pixels += w * h
-        if max(h, w) > 4096 or w * h > 4 * 1024 * 1024 or total_pixels > 16 * 1024 * 1024:
+        if max(h, w) > 4096 or w * h > 4 * 1024 * 1024 or total_pixels > 32 * 1024 * 1024:
             ap.error("reference exceeds Android import limits")
-        if args.mode == "layered":
+        is_layered = "masks" in meta and "layer" in meta
+        if is_layered:
             layer_id = meta["layer"]
             space = meta["map_id"].split("/", 1)[0]
             if meta["map_id"] != f"{space}/{layer_id}":
                 ap.error("inconsistent map identity")
             masks = [cv2.imread(str(Path(prefix).parent / meta["masks"][key]), 0) for key in ("active", "context")]
         else:
-            space, layer_id = meta["tile_code"], "surface_reference"
+            space = meta.get("tile_code", "twt702")
+            layer_id = meta.get("layer", f"surface_{name}")
             masks = [np.full((h, w), 255, np.uint8)] * 2
         if (space, layer_id) in identities:
             ap.error("duplicate layer identity")
@@ -65,7 +67,7 @@ def main():
             activeMask=filenames[1], contextMask=filenames[2], unitsPerPx=meta["units_per_px"],
             originX=meta["origin"][0], originY=meta["origin"][1]))
     payloads["manifest.json"] = json.dumps(manifest, ensure_ascii=False, indent=2).encode()
-    if sum(map(len, payloads.values())) > 64 * 1024 * 1024:
+    if sum(map(len, payloads.values())) > 128 * 1024 * 1024:
         ap.error("pack exceeds decompressed size limit")
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

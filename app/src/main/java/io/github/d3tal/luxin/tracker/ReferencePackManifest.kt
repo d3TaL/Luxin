@@ -29,10 +29,10 @@ data class ReferenceLayer(
 internal object ReferencePackRules {
     const val MANIFEST = "manifest.json"
     const val MAX_MANIFEST_BYTES = 64 * 1024
-    const val MAX_ENTRIES = 64
-    const val MAX_BYTES = 64L * 1024 * 1024
+    const val MAX_ENTRIES = 128
+    const val MAX_BYTES = 128L * 1024 * 1024
     const val MAX_LAYER_PIXELS = 4_000_000L
-    const val MAX_TOTAL_PIXELS = 16_000_000L
+    const val MAX_TOTAL_PIXELS = 32_000_000L
     private val filename = Regex("[a-zA-Z0-9_.-]{1,128}")
     private val json = Json { ignoreUnknownKeys = false }
 
@@ -58,8 +58,8 @@ internal object ReferencePackRules {
         require(manifest.schemaVersion == 1) { "Unsupported reference pack schema" }
         text(manifest.id, 128)
         text(manifest.title, 256)
-        require(manifest.mode == "layered" || manifest.mode == "position_only") { "Unsupported mode" }
-        require(manifest.layers.size in 1..8) { "Expected 1..8 layers" }
+        require(manifest.mode == "layered" || manifest.mode == "position_only" || manifest.mode == "composite") { "Unsupported mode" }
+        require(manifest.layers.size in 1..24) { "Expected 1..24 layers" }
         require(manifest.layers.map { it.space to it.id }.toSet().size == manifest.layers.size) {
             "Duplicate (space, id)"
         }
