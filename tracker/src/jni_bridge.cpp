@@ -1,6 +1,7 @@
 #include "luxin/split_tracker.hpp"
 #include "luxin/bigmap_detector.hpp"
 #include "luxin/bigmap_geometry.hpp"
+#include "luxin/bigmap_session.hpp"
 
 #include <android/bitmap.h>
 #include <android/log.h>
@@ -29,6 +30,7 @@ struct NativeTrackerContext {
     std::mutex mutex;
     std::vector<std::shared_ptr<luxin::LayerReference>> models;
     std::unique_ptr<luxin::SplitTracker> tracker;
+    luxin::BigMapSession bigmap;
     double unit_scale_override = 0.0;
     double unit_scale = 0.75;
     int frame_width = 0;
@@ -103,15 +105,28 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeRegisterBigMap(
     JNIEnv* env, jobject, jlong handle, jobject bitmap, jdouble timestamp
 ) {
     auto* ctx = reinterpret_cast<NativeTrackerContext*>(handle);
-    if (!ctx || !bitmap) return env->NewStringUTF("{\"error\":\"closed tracker or null bitmap\"}");
+    if (!ctx) return env->NewStringUTF("{\"error\":\"closed tracker\"}");
+    std::lock_guard<std::mutex> lock(ctx->mutex);
+    if (!bitmap) {
+        ctx->bigmap.reset();
+        return env->NewStringUTF("{\"error\":\"null bitmap\"}");
+    }
     try {
         cv::Mat bgr;
-        if (!bitmapToBgrMat(env, bitmap, bgr)) return env->NewStringUTF("{\"error\":\"cannot read bitmap\"}");
-        std::lock_guard<std::mutex> lock(ctx->mutex);
-        const auto g = luxin::registerBigMap(bgr, ctx->models, timestamp);
+        if (!bitmapToBgrMat(env, bitmap, bgr)) {
+            ctx->bigmap.reset();
+            return env->NewStringUTF("{\"error\":\"cannot read bitmap\"}");
+        }
+        const auto result = ctx->bigmap.update(bgr, ctx->models, timestamp);
+        const auto& g = result.geometry;
+        LOGI("BigMap phase=%s mode=%s absolute=%d features=%.1f match=%.1f validate=%.1f follow=%.1f ms keypoints=%d",
+            result.phase.c_str(), g.mode.c_str(), result.absolute_attempted,
+            result.registration.features_ms, result.registration.matching_ms,
+            result.registration.validation_ms, result.follow_ms, result.registration.query_features);
         std::ostringstream out;
         out.imbue(std::locale::classic());
-        out << std::setprecision(17) << "{\"mode\":" << jsonString(g.mode);
+        out << std::setprecision(17) << "{\"mode\":" << jsonString(g.mode)
+            << ",\"phase\":" << jsonString(result.phase);
         if (g.mode == "found") {
             out << ",\"space\":" << jsonString(g.space) << ",\"reference\":" << jsonString(g.reference)
                 << ",\"frameWidth\":" << g.frame_width << ",\"frameHeight\":" << g.frame_height
@@ -127,6 +142,7 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeRegisterBigMap(
         out << '}';
         return env->NewStringUTF(out.str().c_str());
     } catch (const std::exception&) {
+        ctx->bigmap.reset();
         return env->NewStringUTF("{\"error\":\"big-map registration failed\"}");
     }
 }
@@ -185,6 +201,17 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeReset(
     if (ctx->tracker) {
         ctx->tracker->reset();
     }
+    ctx->bigmap.reset();
+}
+
+JNIEXPORT void JNICALL
+Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeResetBigMap(
+    JNIEnv*, jobject, jlong handle
+) {
+    auto* ctx = reinterpret_cast<NativeTrackerContext*>(handle);
+    if (!ctx) return;
+    std::lock_guard<std::mutex> lock(ctx->mutex);
+    ctx->bigmap.reset();
 }
 
 JNIEXPORT jboolean JNICALL
@@ -228,6 +255,7 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeAddLayerReferenceFro
         );
         std::lock_guard<std::mutex> lock(ctx->mutex);
         ctx->models.push_back(std::move(ref));
+        ctx->bigmap.reset();
         ctx->tracker = std::make_unique<luxin::SplitTracker>(ctx->models, ctx->unit_scale);
         LOGI("Added layer reference %s/%s (total=%zu)", space.c_str(), layer.c_str(), ctx->models.size());
         return JNI_TRUE;

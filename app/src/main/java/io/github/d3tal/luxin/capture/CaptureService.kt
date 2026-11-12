@@ -431,7 +431,10 @@ class CaptureService : Service() {
                 var paused = true
                 val bigMap = BigMapConfirmation()
                 suspend fun waiting(message: String, width: Int = 0, height: Int = 0, screenMode: String = "unknown") {
-                    if (screenMode != "big_map" && screenMode != "big_map_pending") bigMap.reset()
+                    if (screenMode != "big_map" && screenMode != "big_map_pending") {
+                        bigMap.reset()
+                        engine.resetBigMap()
+                    }
                     if (!paused) engine.reset()
                     paused = true
                     previousProcessMs = 0
@@ -491,6 +494,7 @@ class CaptureService : Service() {
                             lastGeneration = frame.generation
                         }
                         val screenMode = bigMap.observe(engine.isBigMap(bitmap))
+                        if (screenMode == "unknown") engine.resetBigMap()
                         ensureActive()
                         if (synchronized(imageLock) { generation != frame.generation }) {
                             waiting("Размер кадра изменился", frame.width, frame.height)
@@ -511,17 +515,24 @@ class CaptureService : Service() {
                                     }
                                 }
                                 val currentAge = System.nanoTime() - frame.timestampNs
+                                Log.d(TAG, "BigMap phase=${decoded.phase} mode=${decoded.mode} " +
+                                    "nativeMs=${SystemClock.elapsedRealtime() - start} ageMs=${currentAge / 1_000_000}")
                                 if (synchronized(imageLock) { generation != frame.generation } ||
                                     currentAge !in 0L..1_000_000_000L) {
                                     waiting("Привязка устарела; ожидаю обновление", frame.width, frame.height,
                                         screenMode = "big_map")
                                 } else {
                                     publishLive(epoch, LiveTrackingState(enabled = true, status = "paused",
-                                        message = if (decoded.geometry != null) "Большая карта привязана (этаж неизвестен)"
-                                            else "Открыта большая карта; привязка ${decoded.mode}",
+                                        message = when {
+                                            decoded.geometry != null -> "Большая карта подтверждена (этаж неизвестен)"
+                                            decoded.phase == "confirming" -> "Привязка-кандидат; проверяю свежий кадр"
+                                            decoded.phase == "moving" -> "Карта движется; геометрия скрыта"
+                                            decoded.phase == "acquiring" -> "Ожидаю повторной привязки"
+                                            else -> "Открыта большая карта; привязка ${decoded.mode} (${decoded.phase})"
+                                        },
                                         packTitle = pack.manifest.title, frameWidth = frame.width, frameHeight = frame.height,
                                         screenMode = screenMode, bigMapGeometry = decoded.geometry,
-                                        bigMapGeometryMode = decoded.mode, inliers = decoded.geometry?.inliers ?: 0,
+                                        bigMapGeometryMode = decoded.phase, inliers = decoded.geometry?.inliers ?: 0,
                                         nativeMs = SystemClock.elapsedRealtime() - start, frameAgeMs = currentAge / 1_000_000),
                                         expectedGeneration = frame.generation, timestampNs = frame.timestampNs,
                                         expectedRevision = frameRevision)

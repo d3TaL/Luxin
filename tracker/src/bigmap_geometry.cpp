@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <opencv2/imgproc.hpp>
 
 namespace luxin {
@@ -57,7 +58,14 @@ bool equivalent(const BigMapGeometry& a, const BigMapGeometry& b) {
 } // namespace
 
 BigMapGeometry registerBigMap(const cv::Mat& frame,
-    const std::vector<std::shared_ptr<LayerReference>>& references, double timestamp_seconds) {
+    const std::vector<std::shared_ptr<LayerReference>>& references, double timestamp_seconds,
+    BigMapRegistrationStats* stats) {
+    if (stats) *stats = {};
+    using Clock = std::chrono::steady_clock;
+    auto milliseconds = [](Clock::time_point start) {
+        return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+    };
+    const auto featureStart = Clock::now();
     BigMapGeometry rejected;
     if (frame.empty() || frame.cols <= frame.rows || !std::isfinite(timestamp_seconds) || timestamp_seconds < 0 ||
         (frame.type() != CV_8UC1 && frame.type() != CV_8UC3)) return rejected;
@@ -81,6 +89,12 @@ BigMapGeometry registerBigMap(const cv::Mat& frame,
     std::vector<cv::KeyPoint> keypoints;
     cv::Mat descriptors;
     cv::SIFT::create(12000, 3, 0.02)->detectAndCompute(query, bigMapGeometryMask(query.size()), keypoints, descriptors);
+    if (stats) {
+        stats->features_ms = milliseconds(featureStart);
+        stats->query_features = static_cast<int>(keypoints.size());
+        stats->extraction_width = query.cols;
+        stats->extraction_height = query.rows;
+    }
     if (descriptors.empty()) return rejected;
     std::vector<cv::Point2f> points;
     for (const auto& kp : keypoints) points.emplace_back(kp.pt.x / kx, kp.pt.y / ky);
@@ -88,8 +102,20 @@ BigMapGeometry registerBigMap(const cv::Mat& frame,
     for (const auto& ref : references) {
         if (!ref || !std::isfinite(ref->originX()) || !std::isfinite(ref->originY())) continue;
         Registration reg;
-        if (!ref->registerQuery(points, descriptors, crop, frame.rows / 1440.0,
-                nullptr, 0, reg, 0.1, 6.0)) continue;
+        const auto matchingStart = Clock::now();
+        const bool registered = ref->registerQuery(points, descriptors, crop, frame.rows / 1440.0,
+                nullptr, 0, reg, 0.1, 6.0);
+        if (stats) stats->matching_ms += milliseconds(matchingStart);
+        if (!registered) continue;
+        const auto validationStart = Clock::now();
+        // Account for early-rejected candidates as well as accepted candidates.
+        struct ValidationTimer {
+            BigMapRegistrationStats* stats;
+            Clock::time_point start;
+            ~ValidationTimer() {
+                if (stats) stats->validation_ms += std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+            }
+        } validationTimer{stats, validationStart};
         // Reject cheap failures before allocating/warping a full-frame context mask.
         // The complete shared gate below remains authoritative for spatial quality.
         if (!bigMapGeometryQualityAccepted(reg.inliers, reg.matches, reg.error_px,

@@ -76,6 +76,13 @@ class NativeSplitTracker(unitScale: Double = 0.0) : Closeable {
 
     private external fun nativeRegisterBigMap(handle: Long, frameBitmap: Bitmap, timestampSeconds: Double): String
 
+    @Synchronized
+    fun resetBigMap() {
+        if (handle != 0L) nativeResetBigMap(handle)
+    }
+
+    private external fun nativeResetBigMap(handle: Long)
+
     fun runSelfTest(): String = nativeRunSelfTest()
 
     @Synchronized

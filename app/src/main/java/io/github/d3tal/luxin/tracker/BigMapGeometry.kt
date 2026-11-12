@@ -86,13 +86,15 @@ data class BigMapGeometry(
 
 data class DecodedBigMapGeometry(
     val mode: String,
-    val geometry: BigMapGeometry?
+    val geometry: BigMapGeometry?,
+    val phase: String = "absolute"
 )
 
 @Serializable
 private data class NativeBigMapPayload(
     val error: String? = null,
     val mode: String = "rejected",
+    val phase: String = "absolute",
     val space: String? = null,
     val reference: String? = null,
     val matrix: List<Double>? = null,
@@ -112,27 +114,31 @@ object BigMapGeometryDecoder {
         val payload = try {
             json.decodeFromString(NativeBigMapPayload.serializer(), raw)
         } catch (_: Exception) {
-            return DecodedBigMapGeometry("rejected", null)
+            return DecodedBigMapGeometry("rejected", null, "rejected")
         }
 
         if (payload.error != null) {
-            return DecodedBigMapGeometry("rejected", null)
+            return DecodedBigMapGeometry("rejected", null, "rejected")
         }
 
         if (payload.mode != "found") {
-            return DecodedBigMapGeometry(payload.mode, null)
+            return DecodedBigMapGeometry(payload.mode, null, payload.phase)
         }
 
-        val space = payload.space?.takeIf { it.isNotBlank() } ?: return DecodedBigMapGeometry("rejected", null)
-        val reference = payload.reference?.takeIf { it.isNotBlank() } ?: return DecodedBigMapGeometry("rejected", null)
-        val frameWidth = payload.frameWidth?.takeIf { it > 0 } ?: return DecodedBigMapGeometry("rejected", null)
-        val frameHeight = payload.frameHeight?.takeIf { it > 0 } ?: return DecodedBigMapGeometry("rejected", null)
-        val timestampSeconds = payload.timestampSeconds?.takeIf { it.isFinite() && it >= 0.0 } ?: return DecodedBigMapGeometry("rejected", null)
-        val inliers = payload.inliers?.takeIf { it >= 12 } ?: return DecodedBigMapGeometry("rejected", null)
-        val matches = payload.matches?.takeIf { it >= inliers } ?: return DecodedBigMapGeometry("rejected", null)
-        val errorPx = payload.errorPx?.takeIf { it.isFinite() && it >= 0.0 } ?: return DecodedBigMapGeometry("rejected", null)
-        val support = payload.support?.takeIf { it.isFinite() && it in 0.0..1.0 } ?: return DecodedBigMapGeometry("rejected", null)
-        val matrix = payload.matrix?.takeIf { it.size == 6 && it.all { v -> v.isFinite() } } ?: return DecodedBigMapGeometry("rejected", null)
+        if (payload.phase != "tracking" && payload.phase != "absolute") {
+            return DecodedBigMapGeometry(payload.mode, null, payload.phase)
+        }
+
+        val space = payload.space?.takeIf { it.isNotBlank() } ?: return DecodedBigMapGeometry("rejected", null, "rejected")
+        val reference = payload.reference?.takeIf { it.isNotBlank() } ?: return DecodedBigMapGeometry("rejected", null, "rejected")
+        val frameWidth = payload.frameWidth?.takeIf { it > 0 } ?: return DecodedBigMapGeometry("rejected", null, "rejected")
+        val frameHeight = payload.frameHeight?.takeIf { it > 0 } ?: return DecodedBigMapGeometry("rejected", null, "rejected")
+        val timestampSeconds = payload.timestampSeconds?.takeIf { it.isFinite() && it >= 0.0 } ?: return DecodedBigMapGeometry("rejected", null, "rejected")
+        val inliers = payload.inliers?.takeIf { it >= 12 } ?: return DecodedBigMapGeometry("rejected", null, "rejected")
+        val matches = payload.matches?.takeIf { it >= inliers } ?: return DecodedBigMapGeometry("rejected", null, "rejected")
+        val errorPx = payload.errorPx?.takeIf { it.isFinite() && it >= 0.0 } ?: return DecodedBigMapGeometry("rejected", null, "rejected")
+        val support = payload.support?.takeIf { it.isFinite() && it in 0.0..1.0 } ?: return DecodedBigMapGeometry("rejected", null, "rejected")
+        val matrix = payload.matrix?.takeIf { it.size == 6 && it.all { v -> v.isFinite() } } ?: return DecodedBigMapGeometry("rejected", null, "rejected")
 
         val geometry = try {
             BigMapGeometry(
@@ -148,9 +154,9 @@ object BigMapGeometryDecoder {
                 support = support
             )
         } catch (_: IllegalArgumentException) {
-            return DecodedBigMapGeometry("rejected", null)
+            return DecodedBigMapGeometry("rejected", null, "rejected")
         }
 
-        return DecodedBigMapGeometry("found", geometry)
+        return DecodedBigMapGeometry("found", geometry, payload.phase)
     }
 }

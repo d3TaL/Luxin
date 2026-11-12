@@ -26,10 +26,20 @@ cv::Mat bigMapGeometryMask(cv::Size size);
 bool bigMapGeometryQualityAccepted(int inliers, int matches, double error_px,
                                    double hull_area, int visible_pixels, cv::Size frame_size);
 
+struct BigMapRegistrationStats {
+    double features_ms = 0.0;
+    double matching_ms = 0.0;
+    double validation_ms = 0.0;
+    int query_features = 0;
+    int extraction_width = 0;
+    int extraction_height = 0;
+};
+
 BigMapGeometry registerBigMap(
     const cv::Mat& frame,
     const std::vector<std::shared_ptr<LayerReference>>& references,
-    double timestamp_seconds
+    double timestamp_seconds,
+    BigMapRegistrationStats* stats = nullptr
 );
 
 } // namespace luxin

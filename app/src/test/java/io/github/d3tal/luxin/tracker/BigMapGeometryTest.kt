@@ -282,4 +282,64 @@ class BigMapGeometryTest {
         assertEquals("rejected", decoded.mode)
         assertNull(decoded.geometry)
     }
+
+    @Test
+    fun validFoundTrackingDecodesGeometry() {
+        val trackingJson = validFoundJson.replace(
+            "\"mode\": \"found\",",
+            "\"mode\": \"found\",\n            \"phase\": \"tracking\","
+        )
+        val decoded = BigMapGeometryDecoder.decode(trackingJson)
+        assertEquals("found", decoded.mode)
+        assertEquals("tracking", decoded.phase)
+        val geometry = decoded.geometry
+        assertNotNull(geometry)
+        assertEquals("twt702", geometry!!.space)
+        assertEquals("surface-ref", geometry.reference)
+        assertEquals(1560, geometry.frameWidth)
+        assertEquals(720, geometry.frameHeight)
+    }
+
+    @Test
+    fun foundMovingConfirmingAcquiringReturnsNullGeometry() {
+        for (phase in listOf("moving", "confirming", "acquiring", "unknown_phase")) {
+            val json = validFoundJson.replace(
+                "\"mode\": \"found\",",
+                "\"mode\": \"found\",\n            \"phase\": \"$phase\","
+            )
+            val decoded = BigMapGeometryDecoder.decode(json)
+            assertEquals("found", decoded.mode)
+            assertEquals(phase, decoded.phase)
+            assertNull(decoded.geometry)
+        }
+    }
+
+    @Test
+    fun nonfoundWithResidualMatrixPhaseConfirmingDropped() {
+        val nonfoundConfirming = validFoundJson.replace(
+            "\"mode\": \"found\",",
+            "\"mode\": \"rejected\",\n            \"phase\": \"confirming\","
+        )
+        val decoded = BigMapGeometryDecoder.decode(nonfoundConfirming)
+        assertEquals("rejected", decoded.mode)
+        assertEquals("confirming", decoded.phase)
+        assertNull(decoded.geometry)
+    }
+
+    @Test
+    fun legacyValidUnchangedDefaultAbsolutePhase() {
+        val decoded = BigMapGeometryDecoder.decode(validFoundJson)
+        assertEquals("found", decoded.mode)
+        assertEquals("absolute", decoded.phase)
+        assertNotNull(decoded.geometry)
+    }
+
+    @Test
+    fun malformedFoundWithConfirmingPhaseNeverExposesGeometry() {
+        val malformedConfirming = """{"mode":"found","phase":"confirming"}"""
+        val decoded = BigMapGeometryDecoder.decode(malformedConfirming)
+        assertEquals("found", decoded.mode)
+        assertEquals("confirming", decoded.phase)
+        assertNull(decoded.geometry)
+    }
 }

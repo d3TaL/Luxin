@@ -1,5 +1,6 @@
 // Local opt-in diagnostic. Inputs stay outside Git; output contains no images or UID.
 #include "luxin/bigmap_geometry.hpp"
+#include "luxin/bigmap_session.hpp"
 #include <chrono>
 #include <iostream>
 #include <opencv2/imgcodecs.hpp>
@@ -7,6 +8,9 @@
 int main(int argc, char** argv) try {
     cv::setNumThreads(2);
     int next = 1;
+    const bool temporal = next < argc && std::string(argv[next]) == "--session";
+    if (temporal) ++next;
+    luxin::BigMapSession session;
     std::vector<std::shared_ptr<luxin::LayerReference>> refs;
     while (next < argc && std::string(argv[next]) == "--ref" && next + 5 < argc) {
         const auto gray = cv::imread(argv[next + 1], cv::IMREAD_GRAYSCALE);
@@ -19,7 +23,7 @@ int main(int argc, char** argv) try {
         next += 6;
     }
     if (refs.empty() || next >= argc || std::string(argv[next]) != "--frames" || ++next >= argc) {
-        std::cerr << "usage: bigmap_geometry_frames --ref reference.png space units_per_px origin_x origin_y [--ref ...] --frames frame.jpg...\n";
+        std::cerr << "usage: bigmap_geometry_frames [--session] --ref reference.png space units_per_px origin_x origin_y [--ref ...] --frames frame.jpg...\n";
         return 2;
     }
     const int first = next;
@@ -27,10 +31,21 @@ int main(int argc, char** argv) try {
         auto frame = cv::imread(argv[i]);
         if (frame.empty()) return 2;
         const auto start = std::chrono::steady_clock::now();
-        auto result = luxin::registerBigMap(frame, refs, i);
+        luxin::BigMapGeometry result;
+        std::string phase = "absolute";
+        luxin::BigMapRegistrationStats stats;
+        double followMs = 0;
+        if (temporal) {
+            const auto value = session.update(frame, refs, 1 + (i - first) * 0.5);
+            result = value.geometry;
+            phase = value.phase;
+            stats = value.registration;
+            followMs = value.follow_ms;
+        } else result = luxin::registerBigMap(frame, refs, i, &stats);
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-        std::cout << "input=" << i - first + 1 << " mode=" << result.mode << " ref=" << result.reference << " inliers=" << result.inliers
-            << " errorPx=" << result.error_px << " support=" << result.support << " ms=" << ms;
+        std::cout << "input=" << i - first + 1 << " mode=" << result.mode << " phase=" << phase << " ref=" << result.reference << " inliers=" << result.inliers
+            << " errorPx=" << result.error_px << " support=" << result.support << " ms=" << ms
+            << " featuresMs=" << stats.features_ms << " matchingMs=" << stats.matching_ms << " followMs=" << followMs;
         if (!result.matrix.empty()) std::cout << " matrix=" << result.matrix;
         std::cout << '\n';
     }
