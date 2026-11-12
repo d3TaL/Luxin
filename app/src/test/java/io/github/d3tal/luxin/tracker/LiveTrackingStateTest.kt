@@ -59,6 +59,31 @@ class LiveTrackingStateTest {
         assertTrue(text.contains("неизвестен"))
     }
 
+    @Test fun bigMapGeometryIsNotPlayerPositionOrFloor() {
+        val geometry = BigMapGeometryDecoder.decode("""{"mode":"found","space":"twt702","reference":"surface-ref",
+            "matrix":[1.0,0.0,20.0,0.0,1.0,30.0],"frameWidth":1560,"frameHeight":720,
+            "timestampSeconds":1.0,"inliers":20,"matches":25,"errorPx":0.5,"support":0.4}""").geometry
+        val state = LiveTrackingState(enabled = true, screenMode = "big_map", bigMapGeometry = geometry,
+            bigMapGeometryMode = "found")
+        assertNotNull(state.bigMapGeometry)
+        assertNull(state.position)
+        assertNull(state.layer)
+        val hud = formatTrackingHud(state)
+        assertTrue(hud.contains("Геометрия: found"))
+        assertTrue(hud.contains("ошибка 0.50 px"))
+        assertTrue(hud.contains("неизвестен"))
+        assertNull(LiveTrackingState(enabled = true, status = "paused").bigMapGeometry)
+    }
+
+    @Test fun transientPauseInvalidatesInFlightGeometryAfterVisibilityReturns() {
+        assertTrue(bigMapFrameIsCurrent(4, 4, 2, 2, 100, 500))
+        // Hide/show retains capture generation, but the pause revision has changed.
+        assertFalse(bigMapFrameIsCurrent(4, 5, 2, 2, 100, 500))
+        assertFalse(bigMapFrameIsCurrent(4, 4, 2, 3, 100, 500))
+        assertFalse(bigMapFrameIsCurrent(4, 4, 2, 2, 100, 1_000_000_101))
+        assertFalse(bigMapFrameIsCurrent(4, 4, 2, 2, 500, 100))
+    }
+
     @Test fun arrowColourAndResolutionThresholdMatchTheSpike() {
         val cyan = 0xff00ffff.toInt()
         assertTrue(PlayerArrowSignal.isArrowPixel(cyan))

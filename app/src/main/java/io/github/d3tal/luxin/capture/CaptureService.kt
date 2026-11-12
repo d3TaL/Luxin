@@ -31,6 +31,8 @@ import io.github.d3tal.luxin.tracker.LiveTrackingStatus
 import io.github.d3tal.luxin.tracker.NativeSplitTracker
 import io.github.d3tal.luxin.tracker.PlayerArrowSignal
 import io.github.d3tal.luxin.tracker.BigMapConfirmation
+import io.github.d3tal.luxin.tracker.BigMapGeometryDecoder
+import io.github.d3tal.luxin.tracker.bigMapFrameIsCurrent
 import io.github.d3tal.luxin.tracker.ReferencePackStore
 import io.github.d3tal.luxin.tracker.TrackingFrameDecoder
 import kotlinx.coroutines.CancellationException
@@ -89,6 +91,7 @@ class CaptureService : Service() {
     private var stopping = false
     private var receivedContentSize = false
     @Volatile private var capturedContentVisible = true
+    @Volatile private var trackingRevision = 0L
     private var trackingJob: Job? = null
     // Epoch and status publications are confined to Main, preventing late native results after Stop.
     private var trackingEpoch = 0L
@@ -98,6 +101,7 @@ class CaptureService : Service() {
 
         override fun onCapturedContentVisibilityChanged(isVisible: Boolean) {
             capturedContentVisible = isVisible
+            if (!isVisible) trackingRevision++
             val previous = LiveTrackingStatus.state.value
             if (!isVisible && previous.enabled) {
                 LiveTrackingStatus.publish(LiveTrackingState(enabled = true, status = "paused",
@@ -259,6 +263,12 @@ class CaptureService : Service() {
             readerHeight = height
             generation++
             old?.close()
+            trackingRevision++
+            val previous = LiveTrackingStatus.state.value
+            if (previous.bigMapGeometry != null) {
+                LiveTrackingStatus.publish(LiveTrackingState(enabled = previous.enabled, status = "paused",
+                    message = "Размер кадра изменился", packTitle = previous.packTitle))
+            }
             Log.i(TAG, "Capture resized to ${width}x$height, generation=$generation")
         }
     }
@@ -299,6 +309,10 @@ class CaptureService : Service() {
             Log.i(TAG, "Snapshot already in progress; ignoring duplicate request")
             return
         }
+        trackingRevision++
+        val previous = LiveTrackingStatus.state.value
+        if (previous.enabled) LiveTrackingStatus.publish(LiveTrackingState(enabled = true, status = "paused",
+            message = "Пауза: ручной снимок", packTitle = previous.packTitle))
         snapshotJob = scope.launch {
             val startMs = SystemClock.elapsedRealtime()
             var bitmap: Bitmap? = null
@@ -411,6 +425,7 @@ class CaptureService : Service() {
                 val names = pack.manifest.layers.associate { "${it.space}/${it.id}" to it.name }
                 var lastTimestamp = 0L
                 var lastGeneration = -1L
+                var lastRevision = -1L
                 var previousProcessMs = 0L
                 var displayShortSide = -1
                 var paused = true
@@ -426,6 +441,12 @@ class CaptureService : Service() {
                 while (_isRunning.value) {
                     ensureActive()
                     val loopStart = SystemClock.elapsedRealtime()
+                    val frameRevision = trackingRevision
+                    if (lastRevision != frameRevision) {
+                        engine.reset()
+                        bigMap.reset()
+                        lastRevision = frameRevision
+                    }
                     if (!capturedContentVisible || snapshotBusy.get()) {
                         waiting(if (!capturedContentVisible) "Захватываемое приложение не видно" else "Пауза: ручной снимок")
                         delay(100)
@@ -478,6 +499,34 @@ class CaptureService : Service() {
                         if (screenMode == "big_map" || screenMode == "big_map_pending") {
                             waiting(if (screenMode == "big_map") "Открыта большая карта" else "Подтверждение большой карты",
                                 frame.width, frame.height, screenMode)
+                            if (screenMode == "big_map") {
+                                val start = SystemClock.elapsedRealtime()
+                                val decoded = BigMapGeometryDecoder.decode(engine.registerBigMapJson(
+                                    bitmap, frame.timestampNs / 1_000_000_000.0))
+                                ensureActive()
+                                decoded.geometry?.let {
+                                    check(it.frameWidth == frame.width && it.frameHeight == frame.height &&
+                                        kotlin.math.abs(it.timestampSeconds - frame.timestampNs / 1_000_000_000.0) < 1e-6) {
+                                        "Геометрия не соответствует захваченному кадру"
+                                    }
+                                }
+                                val currentAge = System.nanoTime() - frame.timestampNs
+                                if (synchronized(imageLock) { generation != frame.generation } ||
+                                    currentAge !in 0L..1_000_000_000L) {
+                                    waiting("Привязка устарела; ожидаю обновление", frame.width, frame.height,
+                                        screenMode = "big_map")
+                                } else {
+                                    publishLive(epoch, LiveTrackingState(enabled = true, status = "paused",
+                                        message = if (decoded.geometry != null) "Большая карта привязана (этаж неизвестен)"
+                                            else "Открыта большая карта; привязка ${decoded.mode}",
+                                        packTitle = pack.manifest.title, frameWidth = frame.width, frameHeight = frame.height,
+                                        screenMode = screenMode, bigMapGeometry = decoded.geometry,
+                                        bigMapGeometryMode = decoded.mode, inliers = decoded.geometry?.inliers ?: 0,
+                                        nativeMs = SystemClock.elapsedRealtime() - start, frameAgeMs = currentAge / 1_000_000),
+                                        expectedGeneration = frame.generation, timestampNs = frame.timestampNs,
+                                        expectedRevision = frameRevision)
+                                }
+                            }
                             delay((500 - (SystemClock.elapsedRealtime() - loopStart)).coerceAtLeast(0))
                             continue
                         }
@@ -545,10 +594,17 @@ class CaptureService : Service() {
         }
     }
 
-    private suspend fun publishLive(epoch: Long, state: LiveTrackingState) = withContext(Dispatchers.Main.immediate) {
+    private suspend fun publishLive(epoch: Long, state: LiveTrackingState,
+                                   expectedGeneration: Long? = null, timestampNs: Long? = null,
+                                   expectedRevision: Long? = null) = withContext(Dispatchers.Main.immediate) {
         if (trackingEpoch == epoch) {
             val blocked = state.enabled && state.status != "loading" && (!capturedContentVisible || snapshotBusy.get())
-            LiveTrackingStatus.publish(if (blocked) LiveTrackingState(enabled = true, status = "paused",
+            val obsolete = expectedGeneration != null && (timestampNs == null || expectedRevision == null ||
+                !bigMapFrameIsCurrent(expectedRevision, trackingRevision, expectedGeneration,
+                    synchronized(imageLock) { generation }, timestampNs, System.nanoTime()))
+            LiveTrackingStatus.publish(if (obsolete) LiveTrackingState(enabled = true, status = "paused",
+                message = "Привязка устарела; ожидаю обновление", packTitle = state.packTitle)
+            else if (blocked) LiveTrackingState(enabled = true, status = "paused",
                 message = if (!capturedContentVisible) "Захватываемое приложение не видно" else "Пауза: ручной снимок",
                 packTitle = state.packTitle) else state)
         }

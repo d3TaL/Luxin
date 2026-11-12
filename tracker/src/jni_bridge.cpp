@@ -1,5 +1,6 @@
 #include "luxin/split_tracker.hpp"
 #include "luxin/bigmap_detector.hpp"
+#include "luxin/bigmap_geometry.hpp"
 
 #include <android/bitmap.h>
 #include <android/log.h>
@@ -8,6 +9,8 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <iomanip>
+#include <locale>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -79,9 +82,54 @@ std::string jstringToStd(JNIEnv* env, jstring jstr) {
     return res;
 }
 
+std::string jsonString(const std::string& text) {
+    std::ostringstream out;
+    out << '"';
+    for (unsigned char c : text) {
+        if (c == '"' || c == '\\') out << '\\' << c;
+        else if (c < 0x20) out << "\\u" << std::hex << std::setw(4) << std::setfill('0') << int(c) << std::dec;
+        else out << c;
+    }
+    out << '"';
+    return out.str();
+}
+
 } // namespace
 
 extern "C" {
+
+JNIEXPORT jstring JNICALL
+Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeRegisterBigMap(
+    JNIEnv* env, jobject, jlong handle, jobject bitmap, jdouble timestamp
+) {
+    auto* ctx = reinterpret_cast<NativeTrackerContext*>(handle);
+    if (!ctx || !bitmap) return env->NewStringUTF("{\"error\":\"closed tracker or null bitmap\"}");
+    try {
+        cv::Mat bgr;
+        if (!bitmapToBgrMat(env, bitmap, bgr)) return env->NewStringUTF("{\"error\":\"cannot read bitmap\"}");
+        std::lock_guard<std::mutex> lock(ctx->mutex);
+        const auto g = luxin::registerBigMap(bgr, ctx->models, timestamp);
+        std::ostringstream out;
+        out.imbue(std::locale::classic());
+        out << std::setprecision(17) << "{\"mode\":" << jsonString(g.mode);
+        if (g.mode == "found") {
+            out << ",\"space\":" << jsonString(g.space) << ",\"reference\":" << jsonString(g.reference)
+                << ",\"frameWidth\":" << g.frame_width << ",\"frameHeight\":" << g.frame_height
+                << ",\"timestampSeconds\":" << g.timestamp_seconds << ",\"inliers\":" << g.inliers
+                << ",\"matches\":" << g.matches << ",\"errorPx\":" << g.error_px
+                << ",\"support\":" << g.support << ",\"matrix\":[";
+            for (int i = 0; i < 6; ++i) {
+                if (i) out << ',';
+                out << g.matrix.at<double>(i / 3, i % 3);
+            }
+            out << ']';
+        }
+        out << '}';
+        return env->NewStringUTF(out.str().c_str());
+    } catch (const std::exception&) {
+        return env->NewStringUTF("{\"error\":\"big-map registration failed\"}");
+    }
+}
 
 JNIEXPORT jboolean JNICALL
 Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeIsBigMap(

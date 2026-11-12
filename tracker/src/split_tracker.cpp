@@ -215,7 +215,9 @@ bool LayerReference::registerQuery(
     double unit_scale,
     const PositionFix* hint,
     double radius,
-    Registration& out_reg
+    Registration& out_reg,
+    double min_scale_ratio,
+    double max_scale_ratio
 ) const {
     if (descriptors_.empty() || points_.size() < 2 || query_descriptors.empty() || query_points.size() < 6) {
         return false;
@@ -332,7 +334,7 @@ bool LayerReference::registerQuery(
     }
     const double scale = 1.0 / (size * upp_);
     const double rotation = std::atan2(m10, m00) * (180.0 / CV_PI);
-    if (std::abs(rotation) > 2.0 || !(scale / unit_scale >= 0.8 && scale / unit_scale <= 3.4)) {
+    if (std::abs(rotation) > 2.0 || !(scale / unit_scale >= min_scale_ratio && scale / unit_scale <= max_scale_ratio)) {
         return false;
     }
 

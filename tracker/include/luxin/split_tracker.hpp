@@ -144,6 +144,8 @@ public:
     double originX() const { return ox_; }
     double originY() const { return oy_; }
 
+    // Scale ratios are relative to unit_scale; defaults preserve minimap behaviour.
+    // Big-map geometry supplies a wider range, without treating its centre as the player.
     bool registerQuery(
         const std::vector<cv::Point2f>& query_points,
         const cv::Mat& query_descriptors,
@@ -151,7 +153,9 @@ public:
         double unit_scale,
         const PositionFix* hint,
         double radius,
-        Registration& out_reg
+        Registration& out_reg,
+        double min_scale_ratio = 0.8,
+        double max_scale_ratio = 3.4
     ) const;
 
 private:

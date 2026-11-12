@@ -67,6 +67,15 @@ class NativeSplitTracker(unitScale: Double = 0.0) : Closeable {
 
     private external fun nativeIsBigMap(frameBitmap: Bitmap): Boolean
 
+    @Synchronized
+    fun registerBigMapJson(frameBitmap: Bitmap, timestampSeconds: Double): String {
+        if (handle == 0L) return "{\"error\":\"closed tracker\"}"
+        require(timestampSeconds.isFinite() && timestampSeconds >= 0)
+        return nativeRegisterBigMap(handle, frameBitmap, timestampSeconds)
+    }
+
+    private external fun nativeRegisterBigMap(handle: Long, frameBitmap: Bitmap, timestampSeconds: Double): String
+
     fun runSelfTest(): String = nativeRunSelfTest()
 
     @Synchronized

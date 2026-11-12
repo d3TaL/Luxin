@@ -9,6 +9,12 @@ import kotlinx.serialization.json.Json
 /** These values describe diagnostics only. No item markers are rendered by the live spike. */
 data class LivePosition(val space: String, val x: Double, val y: Double, val scale: Double)
 
+/** A transient pause must invalidate an in-flight result even after visibility returns. */
+fun bigMapFrameIsCurrent(expectedRevision: Long, revision: Long, expectedGeneration: Long,
+                         generation: Long, timestampNs: Long, nowNs: Long): Boolean =
+    expectedRevision == revision && expectedGeneration == generation &&
+        nowNs - timestampNs in 0L..1_000_000_000L
+
 data class LiveTrackingState(
     val enabled: Boolean = false,
     val status: String = "off",
@@ -25,7 +31,9 @@ data class LiveTrackingState(
     val nativeMs: Long? = null,
     val frameAgeMs: Long? = null,
     val actualFps: Double? = null,
-    val screenMode: String = "unknown"
+    val screenMode: String = "unknown",
+    val bigMapGeometry: BigMapGeometry? = null,
+    val bigMapGeometryMode: String = "unknown"
 )
 
 fun formatTrackingHud(s: LiveTrackingState): String = buildString {
@@ -37,6 +45,13 @@ fun formatTrackingHud(s: LiveTrackingState): String = buildString {
         else -> "не определён"
     })
     if (s.packTitle.isNotBlank()) append("\n${s.packTitle}")
+    if (s.screenMode == "big_map") {
+        append("\nГеометрия: ${s.bigMapGeometryMode}")
+        s.bigMapGeometry?.let {
+            append(String.format(java.util.Locale.US, "\n%s | опора %s | ошибка %.2f px | покрытие %.2f",
+                it.space, it.reference, it.errorPx, it.support))
+        }
+    }
     s.position?.let {
         append(String.format(java.util.Locale.US, "\n%s: x %.1f  y %.1f  масштаб %.3f", it.space, it.x, it.y, it.scale))
     }

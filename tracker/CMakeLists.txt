@@ -33,6 +33,7 @@ endif()
 add_library(luxin_tracker STATIC
     src/split_tracker.cpp
     src/bigmap_detector.cpp
+    src/bigmap_geometry.cpp
 )
 
 target_include_directories(luxin_tracker
@@ -70,6 +71,13 @@ if(LUXIN_BUILD_TESTS AND NOT ANDROID)
     add_executable(test_bigmap_detector tests/test_bigmap_detector.cpp)
     target_link_libraries(test_bigmap_detector PRIVATE luxin_tracker)
     add_test(NAME test_bigmap_detector COMMAND test_bigmap_detector)
+
+    add_executable(test_bigmap_geometry tests/test_bigmap_geometry.cpp)
+    target_link_libraries(test_bigmap_geometry PRIVATE luxin_tracker)
+    add_test(NAME test_bigmap_geometry COMMAND test_bigmap_geometry)
+
+    add_executable(bigmap_geometry_frames tests/bigmap_geometry_frames.cpp)
+    target_link_libraries(bigmap_geometry_frames PRIVATE luxin_tracker)
 
     add_executable(benchmark_frames
         tests/benchmark_frames.cpp
