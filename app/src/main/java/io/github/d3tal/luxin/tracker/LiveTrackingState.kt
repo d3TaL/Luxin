@@ -15,6 +15,13 @@ fun bigMapFrameIsCurrent(expectedRevision: Long, revision: Long, expectedGenerat
     expectedRevision == revision && expectedGeneration == generation &&
         nowNs - timestampNs in 0L..1_000_000_000L
 
+/** Round up so timer wakeup cannot declare a still-current frame expired early. */
+fun bigMapGeometryRemainingMs(timestampSeconds: Double, nowNs: Long): Long {
+    if (!timestampSeconds.isFinite() || timestampSeconds < 0) return 0
+    val remainingNs = timestampSeconds * 1_000_000_000.0 + 1_000_000_000.0 - nowNs
+    return kotlin.math.ceil(remainingNs / 1_000_000.0).coerceIn(0.0, 1000.0).toLong()
+}
+
 data class LiveTrackingState(
     val enabled: Boolean = false,
     val status: String = "off",

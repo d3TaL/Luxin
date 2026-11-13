@@ -33,6 +33,9 @@ import io.github.d3tal.luxin.tracker.PlayerArrowSignal
 import io.github.d3tal.luxin.tracker.BigMapConfirmation
 import io.github.d3tal.luxin.tracker.BigMapGeometryDecoder
 import io.github.d3tal.luxin.tracker.bigMapFrameIsCurrent
+import io.github.d3tal.luxin.tracker.bigMapGeometryRemainingMs
+import io.github.d3tal.luxin.tracker.LiveTrackingCadence
+import io.github.d3tal.luxin.tracker.LiveProcessingRate
 import io.github.d3tal.luxin.tracker.ReferencePackStore
 import io.github.d3tal.luxin.tracker.TrackingFrameDecoder
 import kotlinx.coroutines.CancellationException
@@ -93,6 +96,7 @@ class CaptureService : Service() {
     @Volatile private var capturedContentVisible = true
     @Volatile private var trackingRevision = 0L
     private var trackingJob: Job? = null
+    private var geometryExpiryJob: Job? = null
     // Epoch and status publications are confined to Main, preventing late native results after Stop.
     private var trackingEpoch = 0L
 
@@ -429,11 +433,15 @@ class CaptureService : Service() {
                 var previousProcessMs = 0L
                 var displayShortSide = -1
                 var paused = true
+                var lastScreenMode = "unknown"
+                val bigMapRate = LiveProcessingRate()
                 val bigMap = BigMapConfirmation()
                 suspend fun waiting(message: String, width: Int = 0, height: Int = 0, screenMode: String = "unknown") {
                     if (screenMode != "big_map" && screenMode != "big_map_pending") {
                         bigMap.reset()
                         engine.resetBigMap()
+                        lastScreenMode = "unknown"
+                        bigMapRate.reset()
                     }
                     if (!paused) engine.reset()
                     paused = true
@@ -448,6 +456,8 @@ class CaptureService : Service() {
                     if (lastRevision != frameRevision) {
                         engine.reset()
                         bigMap.reset()
+                        lastScreenMode = "unknown"
+                        bigMapRate.reset()
                         lastRevision = frameRevision
                     }
                     if (!capturedContentVisible || snapshotBusy.get()) {
@@ -457,13 +467,22 @@ class CaptureService : Service() {
                     }
                     val frame = readFreshPixels(lastTimestamp)
                     if (frame == null) {
+                        // acquireLatestImage may have no NEW frame at 15 Hz. Do not treat a
+                        // short supply gap as a mode rejection or run the same image twice.
+                        val sameGeometry = synchronized(imageLock) { generation == lastGeneration }
+                        if (LiveTrackingCadence.keepBigMapAnchor(lastScreenMode, lastTimestamp,
+                                System.nanoTime(), sameGeometry)) {
+                            delay(LiveTrackingCadence.delayMs(lastScreenMode,
+                                SystemClock.elapsedRealtime() - loopStart))
+                            continue
+                        }
                         waiting("Ожидание нового кадра")
                         delay(100)
                         continue
                     }
                     lastTimestamp = frame.timestampNs
                     val ageNs = System.nanoTime() - frame.timestampNs
-                    if (ageNs > 1_000_000_000L) {
+                    if (ageNs !in 0L..1_000_000_000L) {
                         waiting("Кадр устарел; ожидаю обновление", frame.width, frame.height)
                         delay(100)
                         continue
@@ -491,19 +510,32 @@ class CaptureService : Service() {
                         if (lastGeneration != frame.generation) {
                             engine.reset()
                             bigMap.reset()
+                            bigMapRate.reset()
                             lastGeneration = frame.generation
                         }
                         val screenMode = bigMap.observe(engine.isBigMap(bitmap))
-                        if (screenMode == "unknown") engine.resetBigMap()
+                        lastScreenMode = screenMode
+                        if (screenMode == "unknown") {
+                            engine.resetBigMap()
+                            bigMapRate.reset()
+                        }
                         ensureActive()
                         if (synchronized(imageLock) { generation != frame.generation }) {
                             waiting("Размер кадра изменился", frame.width, frame.height)
                             continue
                         }
                         if (screenMode == "big_map" || screenMode == "big_map_pending") {
-                            waiting(if (screenMode == "big_map") "Открыта большая карта" else "Подтверждение большой карты",
-                                frame.width, frame.height, screenMode)
+                            if (screenMode == "big_map_pending") {
+                                bigMapRate.reset()
+                                waiting("Подтверждение большой карты", frame.width, frame.height, screenMode)
+                            }
+                            // Do not publish a temporary unknown before every follow result.
+                            // Clear minimap state on entry only; final results below remain fail-closed.
+                            if (!paused) engine.reset()
+                            paused = true
+                            previousProcessMs = 0
                             if (screenMode == "big_map") {
+                                val bigMapFps = bigMapRate.record(loopStart)
                                 val start = SystemClock.elapsedRealtime()
                                 val decoded = BigMapGeometryDecoder.decode(engine.registerBigMapJson(
                                     bitmap, frame.timestampNs / 1_000_000_000.0))
@@ -516,7 +548,8 @@ class CaptureService : Service() {
                                 }
                                 val currentAge = System.nanoTime() - frame.timestampNs
                                 Log.d(TAG, "BigMap phase=${decoded.phase} mode=${decoded.mode} " +
-                                    "nativeMs=${SystemClock.elapsedRealtime() - start} ageMs=${currentAge / 1_000_000}")
+                                    "nativeMs=${SystemClock.elapsedRealtime() - start} ageMs=${currentAge / 1_000_000} " +
+                                    "actualFps=$bigMapFps targetFps=15")
                                 if (synchronized(imageLock) { generation != frame.generation } ||
                                     currentAge !in 0L..1_000_000_000L) {
                                     waiting("Привязка устарела; ожидаю обновление", frame.width, frame.height,
@@ -533,12 +566,13 @@ class CaptureService : Service() {
                                         packTitle = pack.manifest.title, frameWidth = frame.width, frameHeight = frame.height,
                                         screenMode = screenMode, bigMapGeometry = decoded.geometry,
                                         bigMapGeometryMode = decoded.phase, inliers = decoded.geometry?.inliers ?: 0,
-                                        nativeMs = SystemClock.elapsedRealtime() - start, frameAgeMs = currentAge / 1_000_000),
+                                        nativeMs = SystemClock.elapsedRealtime() - start, frameAgeMs = currentAge / 1_000_000,
+                                        actualFps = bigMapFps),
                                         expectedGeneration = frame.generation, timestampNs = frame.timestampNs,
                                         expectedRevision = frameRevision)
                                 }
                             }
-                            delay((500 - (SystemClock.elapsedRealtime() - loopStart)).coerceAtLeast(0))
+                            delay(LiveTrackingCadence.delayMs(screenMode, SystemClock.elapsedRealtime() - loopStart))
                             continue
                         }
                         val a = (26f * frame.height / 1440f).toInt().coerceAtLeast(2)
@@ -589,7 +623,7 @@ class CaptureService : Service() {
                     } finally {
                         bitmap.recycle()
                     }
-                    delay((500 - (SystemClock.elapsedRealtime() - loopStart)).coerceAtLeast(0))
+                    delay(LiveTrackingCadence.delayMs("minimap", SystemClock.elapsedRealtime() - loopStart))
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -609,6 +643,7 @@ class CaptureService : Service() {
                                    expectedGeneration: Long? = null, timestampNs: Long? = null,
                                    expectedRevision: Long? = null) = withContext(Dispatchers.Main.immediate) {
         if (trackingEpoch == epoch) {
+            geometryExpiryJob?.cancel()
             val blocked = state.enabled && state.status != "loading" && (!capturedContentVisible || snapshotBusy.get())
             val obsolete = expectedGeneration != null && (timestampNs == null || expectedRevision == null ||
                 !bigMapFrameIsCurrent(expectedRevision, trackingRevision, expectedGeneration,
@@ -618,11 +653,25 @@ class CaptureService : Service() {
             else if (blocked) LiveTrackingState(enabled = true, status = "paused",
                 message = if (!capturedContentVisible) "Захватываемое приложение не видно" else "Пауза: ручной снимок",
                 packTitle = state.packTitle) else state)
+            val published = LiveTrackingStatus.state.value
+            val geometry = published.bigMapGeometry
+            if (geometry != null) {
+                geometryExpiryJob = scope.launch(Dispatchers.Main.immediate) {
+                    val remaining = bigMapGeometryRemainingMs(geometry.timestampSeconds, System.nanoTime())
+                    delay(remaining)
+                    if (trackingEpoch == epoch && LiveTrackingStatus.state.value === published) {
+                        LiveTrackingStatus.publish(published.copy(bigMapGeometry = null, bigMapGeometryMode = "stale",
+                            message = "Привязка устарела; ожидаю обновление"))
+                    }
+                }
+            }
         }
     }
 
     private fun stopLiveTracking() {
         trackingEpoch++
+        geometryExpiryJob?.cancel()
+        geometryExpiryJob = null
         trackingJob?.cancel()
         trackingJob = null
         LiveTrackingStatus.publish(LiveTrackingState())

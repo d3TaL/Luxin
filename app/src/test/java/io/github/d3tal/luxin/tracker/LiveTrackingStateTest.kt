@@ -84,6 +84,16 @@ class LiveTrackingStateTest {
         assertFalse(bigMapFrameIsCurrent(4, 4, 2, 2, 500, 100))
     }
 
+    @Test fun geometryExpiryUsesFrameTimeNotPublicationTime() {
+        assertEquals(850L, bigMapGeometryRemainingMs(10.0, 10_150_000_000L))
+        assertEquals(0L, bigMapGeometryRemainingMs(10.0, 11_000_000_001L))
+        assertEquals(1L, bigMapGeometryRemainingMs(10.0, 10_999_999_999L))
+        assertEquals(0L, bigMapGeometryRemainingMs(Double.NaN, 10_000_000_000L))
+        // A new frame gets only its own remaining lifetime, not the old timer's deadline.
+        assertEquals(850L, bigMapGeometryRemainingMs(10.5, 10_650_000_000L))
+        assertEquals(350L, bigMapGeometryRemainingMs(10.0, 10_650_000_000L))
+    }
+
     @Test fun arrowColourAndResolutionThresholdMatchTheSpike() {
         val cyan = 0xff00ffff.toInt()
         assertTrue(PlayerArrowSignal.isArrowPixel(cyan))
