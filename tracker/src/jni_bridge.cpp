@@ -8,6 +8,7 @@
 #include <jni.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <iomanip>
@@ -96,6 +97,57 @@ std::string jsonString(const std::string& text) {
     return out.str();
 }
 
+using DiagnosticClock = std::chrono::steady_clock;
+
+double diagnosticMs(DiagnosticClock::time_point start) noexcept {
+    return std::chrono::duration<double, std::milli>(DiagnosticClock::now() - start).count();
+}
+
+struct BigMapLogContext {
+    double timestamp;
+    int width;
+    int height;
+    double conversion_ms;
+};
+
+// Log only scalar quality/timing data. Never log pixels, reference paths, or JSON.
+void logBigMapDiagnostics(const luxin::BigMapSessionResult& result,
+    const BigMapLogContext& context, const char* stage, double session_ms = -1.0) noexcept {
+    const auto& f = result.follow;
+    LOGI("BigMap stage=%s ts=%.9f frame=%dx%d phase=%s mode=%s absolute=%d throttled=%d "
+        "reset=%s anchorExpired=%d anchorAgeS=%.3f gapS=%.3f sinceAttemptS=%.3f "
+        "follow=%s followMs=%.1f movementPx=%.3f stable=%d convertMs=%.1f "
+        "features=%.1f match=%.1f validate=%.1f ms keypoints=%d sessionMs=%.1f",
+        stage, context.timestamp, context.width, context.height, result.phase.c_str(),
+        result.geometry.mode.c_str(), result.absolute_attempted, result.absolute_throttled,
+        result.reset_reason, result.anchor_expired, result.anchor_age_seconds,
+        result.observation_gap_seconds, result.since_attempt_seconds, f.outcome,
+        result.follow_ms, result.movement_px, result.stable_frames, context.conversion_ms,
+        result.registration.features_ms, result.registration.matching_ms,
+        result.registration.validation_ms, result.registration.query_features, session_ms);
+    if (f.current_keypoints < 0) return; // follow was not attempted
+    LOGI("BigMapFollow stage=%s ts=%.9f outcome=%s work=%dx%d kp=%d/%d desc=%d/%d "
+        "matches=%d inliers=%d ratio=%.5f grid=%d errorPx=%.4f scale=%.5f angleDeg=%.4f "
+        "hullFrac=%.5f overlap=%d overlapFrac=%.5f denseChanged=%d denseFrac=%.5f "
+        "tilesVisited=%d worstVisitedTile=%d,%d,%d,%d tileChanged=%d tileValid=%d tileFrac=%.5f",
+        stage, context.timestamp, f.outcome, f.working_size.width, f.working_size.height,
+        f.anchor_keypoints, f.current_keypoints, f.anchor_descriptors, f.current_descriptors,
+        f.matches, f.inliers, f.inlier_ratio, f.grid_cells, f.mean_error_px, f.scale, f.angle_degrees,
+        f.hull_fraction, f.overlap_pixels, f.overlap_fraction, f.changed_pixels, f.changed_fraction,
+        f.tiles_evaluated, f.worst_tile.x, f.worst_tile.y, f.worst_tile.width, f.worst_tile.height,
+        f.worst_tile_changed_pixels, f.worst_tile_valid_pixels, f.worst_tile_changed_fraction);
+    for (size_t i = 0; i < f.controls.size(); ++i) {
+        const auto& c = f.controls[i];
+        LOGI("BigMapControl stage=%s ts=%.9f roi=%d rect=%d,%d,%d,%d mean=%.4f changed=%d pixels=%d frac=%.5f",
+            stage, context.timestamp, static_cast<int>(i), c.rect.x, c.rect.y, c.rect.width, c.rect.height,
+            c.mean_delta, c.changed_pixels, c.pixels, c.changed_fraction);
+    }
+}
+
+void logBeforeBigMapAbsolute(const luxin::BigMapSessionResult& result, void* context) noexcept {
+    logBigMapDiagnostics(result, *static_cast<const BigMapLogContext*>(context), "before_absolute");
+}
+
 } // namespace
 
 extern "C" {
@@ -105,24 +157,30 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeRegisterBigMap(
     JNIEnv* env, jobject, jlong handle, jobject bitmap, jdouble timestamp
 ) {
     auto* ctx = reinterpret_cast<NativeTrackerContext*>(handle);
-    if (!ctx) return env->NewStringUTF("{\"error\":\"closed tracker\"}");
+    if (!ctx) {
+        LOGI("BigMap stage=error ts=%.9f reason=closed_tracker", timestamp);
+        return env->NewStringUTF("{\"error\":\"closed tracker\"}");
+    }
     std::lock_guard<std::mutex> lock(ctx->mutex);
     if (!bitmap) {
         ctx->bigmap.reset();
+        LOGI("BigMap stage=error ts=%.9f reset=null_bitmap", timestamp);
         return env->NewStringUTF("{\"error\":\"null bitmap\"}");
     }
     try {
+        const auto conversion_start = DiagnosticClock::now();
         cv::Mat bgr;
         if (!bitmapToBgrMat(env, bitmap, bgr)) {
             ctx->bigmap.reset();
+            LOGI("BigMap stage=error ts=%.9f reset=bitmap_read_failed", timestamp);
             return env->NewStringUTF("{\"error\":\"cannot read bitmap\"}");
         }
-        const auto result = ctx->bigmap.update(bgr, ctx->models, timestamp);
+        BigMapLogContext diagnostics{timestamp, bgr.cols, bgr.rows, diagnosticMs(conversion_start)};
+        const auto session_start = DiagnosticClock::now();
+        const auto result = ctx->bigmap.update(bgr, ctx->models, timestamp, logBeforeBigMapAbsolute, &diagnostics);
+        const double session_ms = diagnosticMs(session_start);
         const auto& g = result.geometry;
-        LOGI("BigMap phase=%s mode=%s absolute=%d features=%.1f match=%.1f validate=%.1f follow=%.1f ms keypoints=%d",
-            result.phase.c_str(), g.mode.c_str(), result.absolute_attempted,
-            result.registration.features_ms, result.registration.matching_ms,
-            result.registration.validation_ms, result.follow_ms, result.registration.query_features);
+        logBigMapDiagnostics(result, diagnostics, "return", session_ms);
         std::ostringstream out;
         out.imbue(std::locale::classic());
         out << std::setprecision(17) << "{\"mode\":" << jsonString(g.mode)
@@ -143,6 +201,7 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeRegisterBigMap(
         return env->NewStringUTF(out.str().c_str());
     } catch (const std::exception&) {
         ctx->bigmap.reset();
+        LOGI("BigMap stage=error ts=%.9f reset=registration_exception", timestamp);
         return env->NewStringUTF("{\"error\":\"big-map registration failed\"}");
     }
 }
@@ -187,6 +246,7 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeDestroy(
 ) {
     auto* ctx = reinterpret_cast<NativeTrackerContext*>(handle);
     delete ctx;
+    LOGI("BigMap stage=reset reason=tracker_destroy");
 }
 
 JNIEXPORT void JNICALL
@@ -202,6 +262,7 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeReset(
         ctx->tracker->reset();
     }
     ctx->bigmap.reset();
+    LOGI("BigMap stage=reset reason=tracker_reset");
 }
 
 JNIEXPORT void JNICALL
@@ -212,6 +273,7 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeResetBigMap(
     if (!ctx) return;
     std::lock_guard<std::mutex> lock(ctx->mutex);
     ctx->bigmap.reset();
+    LOGI("BigMap stage=reset reason=bigmap_reset");
 }
 
 JNIEXPORT jboolean JNICALL
@@ -256,6 +318,7 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeAddLayerReferenceFro
         std::lock_guard<std::mutex> lock(ctx->mutex);
         ctx->models.push_back(std::move(ref));
         ctx->bigmap.reset();
+        LOGI("BigMap stage=reset reason=reference_added");
         ctx->tracker = std::make_unique<luxin::SplitTracker>(ctx->models, ctx->unit_scale);
         LOGI("Added layer reference %s/%s (total=%zu)", space.c_str(), layer.c_str(), ctx->models.size());
         return JNI_TRUE;

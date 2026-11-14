@@ -111,6 +111,7 @@ class CaptureService : Service() {
                 LiveTrackingStatus.publish(LiveTrackingState(enabled = true, status = "paused",
                     message = "Захватываемое приложение не видно", packTitle = previous.packTitle))
             }
+            Log.d(TAG, "BigMap visibility=$isVisible epoch=$trackingEpoch rev=$trackingRevision")
         }
 
         override fun onCapturedContentResize(width: Int, height: Int) {
@@ -273,7 +274,7 @@ class CaptureService : Service() {
                 LiveTrackingStatus.publish(LiveTrackingState(enabled = previous.enabled, status = "paused",
                     message = "Размер кадра изменился", packTitle = previous.packTitle))
             }
-            Log.i(TAG, "Capture resized to ${width}x$height, generation=$generation")
+            Log.i(TAG, "Capture resized to ${width}x$height, generation=$generation rev=$trackingRevision")
         }
     }
 
@@ -317,6 +318,7 @@ class CaptureService : Service() {
         val previous = LiveTrackingStatus.state.value
         if (previous.enabled) LiveTrackingStatus.publish(LiveTrackingState(enabled = true, status = "paused",
             message = "Пауза: ручной снимок", packTitle = previous.packTitle))
+        Log.d(TAG, "BigMap invalidate=snapshot epoch=$trackingEpoch rev=$trackingRevision")
         snapshotJob = scope.launch {
             val startMs = SystemClock.elapsedRealtime()
             var bitmap: Bitmap? = null
@@ -408,6 +410,7 @@ class CaptureService : Service() {
     private fun startLiveTracking() {
         if (trackingJob?.isActive == true) return
         val epoch = ++trackingEpoch
+        Log.d(TAG, "BigMap lifecycle=start epoch=$epoch rev=$trackingRevision")
         LiveTrackingStatus.publish(LiveTrackingState(enabled = true, status = "loading", message = "Загрузка эталонов…"))
         trackingJob = scope.launch {
             var native: NativeSplitTracker? = null
@@ -436,7 +439,11 @@ class CaptureService : Service() {
                 var lastScreenMode = "unknown"
                 val bigMapRate = LiveProcessingRate()
                 val bigMap = BigMapConfirmation()
-                suspend fun waiting(message: String, width: Int = 0, height: Int = 0, screenMode: String = "unknown") {
+                suspend fun waiting(message: String, width: Int = 0, height: Int = 0, screenMode: String = "unknown",
+                                    reason: String) {
+                    Log.d(TAG, "BigMap waiting=$reason epoch=$epoch gen=$lastGeneration rev=$lastRevision " +
+                        "lastTsNs=$lastTimestamp screen=$screenMode " +
+                        "resetBigMap=${screenMode != "big_map" && screenMode != "big_map_pending"} resetAll=${!paused}")
                     if (screenMode != "big_map" && screenMode != "big_map_pending") {
                         bigMap.reset()
                         engine.resetBigMap()
@@ -454,6 +461,7 @@ class CaptureService : Service() {
                     val loopStart = SystemClock.elapsedRealtime()
                     val frameRevision = trackingRevision
                     if (lastRevision != frameRevision) {
+                        Log.d(TAG, "BigMap reset=revision epoch=$epoch old=$lastRevision new=$frameRevision")
                         engine.reset()
                         bigMap.reset()
                         lastScreenMode = "unknown"
@@ -461,11 +469,14 @@ class CaptureService : Service() {
                         lastRevision = frameRevision
                     }
                     if (!capturedContentVisible || snapshotBusy.get()) {
-                        waiting(if (!capturedContentVisible) "Захватываемое приложение не видно" else "Пауза: ручной снимок")
+                        waiting(if (!capturedContentVisible) "Захватываемое приложение не видно" else "Пауза: ручной снимок",
+                            reason = "visibility_or_snapshot")
                         delay(100)
                         continue
                     }
+                    val readStart = SystemClock.elapsedRealtime()
                     val frame = readFreshPixels(lastTimestamp)
+                    val readMs = SystemClock.elapsedRealtime() - readStart
                     if (frame == null) {
                         // acquireLatestImage may have no NEW frame at 15 Hz. Do not treat a
                         // short supply gap as a mode rejection or run the same image twice.
@@ -476,14 +487,14 @@ class CaptureService : Service() {
                                 SystemClock.elapsedRealtime() - loopStart))
                             continue
                         }
-                        waiting("Ожидание нового кадра")
+                        waiting("Ожидание нового кадра", reason = "no_fresh_frame")
                         delay(100)
                         continue
                     }
                     lastTimestamp = frame.timestampNs
                     val ageNs = System.nanoTime() - frame.timestampNs
                     if (ageNs !in 0L..1_000_000_000L) {
-                        waiting("Кадр устарел; ожидаю обновление", frame.width, frame.height)
+                        waiting("Кадр устарел; ожидаю обновление", frame.width, frame.height, reason = "input_age")
                         delay(100)
                         continue
                     }
@@ -491,7 +502,8 @@ class CaptureService : Service() {
                     val shortSide = minOf(bounds.width(), bounds.height())
                     val displayAspect = maxOf(bounds.width(), bounds.height()).toDouble() / shortSide
                     if (frame.width <= frame.height || kotlin.math.abs(frame.width.toDouble() / frame.height - displayAspect) > 0.04) {
-                        waiting("Нужна полноэкранная альбомная игра без чёрных полей", frame.width, frame.height)
+                        waiting("Нужна полноэкранная альбомная игра без чёрных полей", frame.width, frame.height,
+                            reason = "unsupported_geometry")
                         delay(250)
                         continue
                     }
@@ -504,41 +516,62 @@ class CaptureService : Service() {
                     // Aspect checking is not a general crop/inset-origin detector; windowed capture is untested.
                     val k = frame.height.toFloat() / shortSide
                     val ring = RingCalibration(screenRing.cx * k, screenRing.cy * k, screenRing.r * k)
+                    val bitmapStart = SystemClock.elapsedRealtime()
                     val bitmap = Bitmap.createBitmap(frame.width, frame.height, Bitmap.Config.ARGB_8888)
                     try {
                         bitmap.copyPixelsFromBuffer(frame.bytes)
+                        val bitmapMs = SystemClock.elapsedRealtime() - bitmapStart
                         if (lastGeneration != frame.generation) {
+                            Log.d(TAG, "BigMap reset=generation epoch=$epoch old=$lastGeneration new=${frame.generation} " +
+                                "tsNs=${frame.timestampNs} rev=$frameRevision")
                             engine.reset()
                             bigMap.reset()
                             bigMapRate.reset()
                             lastGeneration = frame.generation
                         }
+                        val gateStart = SystemClock.elapsedRealtime()
                         val screenMode = bigMap.observe(engine.isBigMap(bitmap))
+                        val gateMs = SystemClock.elapsedRealtime() - gateStart
                         lastScreenMode = screenMode
                         if (screenMode == "unknown") {
+                            Log.d(TAG, "BigMap reset=ui_gate epoch=$epoch gen=${frame.generation} " +
+                                "tsNs=${frame.timestampNs} rev=$frameRevision")
                             engine.resetBigMap()
                             bigMapRate.reset()
                         }
                         ensureActive()
                         if (synchronized(imageLock) { generation != frame.generation }) {
-                            waiting("Размер кадра изменился", frame.width, frame.height)
+                            waiting("Размер кадра изменился", frame.width, frame.height, reason = "generation_after_gate")
                             continue
                         }
                         if (screenMode == "big_map" || screenMode == "big_map_pending") {
                             if (screenMode == "big_map_pending") {
                                 bigMapRate.reset()
-                                waiting("Подтверждение большой карты", frame.width, frame.height, screenMode)
+                                waiting("Подтверждение большой карты", frame.width, frame.height, screenMode, reason = "ui_pending")
                             }
                             // Do not publish a temporary unknown before every follow result.
                             // Clear minimap state on entry only; final results below remain fail-closed.
-                            if (!paused) engine.reset()
+                            if (!paused) {
+                                Log.d(TAG, "BigMap reset=enter_bigmap epoch=$epoch gen=${frame.generation} rev=$frameRevision")
+                                engine.reset()
+                            }
                             paused = true
                             previousProcessMs = 0
                             if (screenMode == "big_map") {
                                 val bigMapFps = bigMapRate.record(loopStart)
+                                // Same 9-decimal seconds as JNI; tsNs retains the exact Image timestamp.
+                                val diagnosticKey = "epoch=$epoch ts=" +
+                                    String.format(Locale.US, "%.9f", frame.timestampNs / 1_000_000_000.0) +
+                                    " tsNs=${frame.timestampNs} gen=${frame.generation} rev=$frameRevision " +
+                                    "frame=${frame.width}x${frame.height}"
+                                Log.d(TAG, "BigMap stage=begin $diagnosticKey inputAgeMs=${ageNs / 1_000_000} " +
+                                    "readMs=$readMs bitmapMs=$bitmapMs gateMs=$gateMs")
                                 val start = SystemClock.elapsedRealtime()
                                 val decoded = BigMapGeometryDecoder.decode(engine.registerBigMapJson(
                                     bitmap, frame.timestampNs / 1_000_000_000.0))
+                                // A return log is NOT publication: cancellation/freshness gates below are unchanged.
+                                Log.d(TAG, "BigMap stage=native_return $diagnosticKey phase=${decoded.phase} mode=${decoded.mode} " +
+                                    "callDecodeMs=${SystemClock.elapsedRealtime() - start}")
                                 ensureActive()
                                 decoded.geometry?.let {
                                     check(it.frameWidth == frame.width && it.frameHeight == frame.height &&
@@ -547,13 +580,13 @@ class CaptureService : Service() {
                                     }
                                 }
                                 val currentAge = System.nanoTime() - frame.timestampNs
-                                Log.d(TAG, "BigMap phase=${decoded.phase} mode=${decoded.mode} " +
+                                Log.d(TAG, "BigMap stage=checked $diagnosticKey phase=${decoded.phase} mode=${decoded.mode} " +
                                     "nativeMs=${SystemClock.elapsedRealtime() - start} ageMs=${currentAge / 1_000_000} " +
                                     "actualFps=$bigMapFps targetFps=15")
                                 if (synchronized(imageLock) { generation != frame.generation } ||
                                     currentAge !in 0L..1_000_000_000L) {
                                     waiting("Привязка устарела; ожидаю обновление", frame.width, frame.height,
-                                        screenMode = "big_map")
+                                        screenMode = "big_map", reason = "generation_or_age_after_native")
                                 } else {
                                     publishLive(epoch, LiveTrackingState(enabled = true, status = "paused",
                                         message = when {
@@ -580,14 +613,15 @@ class CaptureService : Service() {
                         val y = ring.cy.toInt() - a
                         val side = 2 * a + 1
                         if (x < 0 || y < 0 || x + side > frame.width || y + side > frame.height) {
-                            waiting("Калибровка вне границ кадра", frame.width, frame.height)
+                            waiting("Калибровка вне границ кадра", frame.width, frame.height, reason = "minimap_bounds")
                             delay(250)
                             continue
                         }
                         val arrow = IntArray(side * side)
                         bitmap.getPixels(arrow, 0, side, x, y, side, side)
                         if (!PlayerArrowSignal.present(arrow, frame.height)) {
-                            waiting("Миникарта скрыта или стрелка игрока не найдена", frame.width, frame.height)
+                            waiting("Миникарта скрыта или стрелка игрока не найдена", frame.width, frame.height,
+                                reason = "minimap_arrow")
                             delay(250)
                             continue
                         }
@@ -598,7 +632,7 @@ class CaptureService : Service() {
                         val nativeMs = SystemClock.elapsedRealtime() - startNative
                         ensureActive()
                         if (synchronized(imageLock) { generation != frame.generation }) {
-                            waiting("Размер кадра изменился", frame.width, frame.height)
+                            waiting("Размер кадра изменился", frame.width, frame.height, reason = "generation_after_minimap")
                             continue
                         }
                         val decoded = TrackingFrameDecoder.decode(raw, pack.manifest.mode == "position_only")
@@ -626,6 +660,7 @@ class CaptureService : Service() {
                     delay(LiveTrackingCadence.delayMs("minimap", SystemClock.elapsedRealtime() - loopStart))
                 }
             } catch (e: CancellationException) {
+                Log.d(TAG, "BigMap lifecycle=cancelled epoch=$epoch")
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Live tracker failed", e)
@@ -635,6 +670,7 @@ class CaptureService : Service() {
                 publishLive(epoch, LiveTrackingState(status = "error", message = "Нативная библиотека недоступна: ${e.message}"))
             } finally {
                 native?.close()
+                Log.d(TAG, "BigMap lifecycle=closed epoch=$epoch")
             }
         }
     }
@@ -662,9 +698,18 @@ class CaptureService : Service() {
                     if (trackingEpoch == epoch && LiveTrackingStatus.state.value === published) {
                         LiveTrackingStatus.publish(published.copy(bigMapGeometry = null, bigMapGeometryMode = "stale",
                             message = "Привязка устарела; ожидаю обновление"))
+                        Log.d(TAG, "BigMap invalidate=expiry epoch=$epoch ts=${geometry.timestampSeconds}")
                     }
                 }
             }
+            if (expectedGeneration != null) {
+                Log.d(TAG, "BigMap stage=publish epoch=$epoch tsNs=$timestampNs gen=$expectedGeneration " +
+                    "rev=$expectedRevision obsolete=$obsolete blocked=$blocked phase=${state.bigMapGeometryMode} " +
+                    "geometry=${published.bigMapGeometry != null}")
+            }
+        } else if (expectedGeneration != null) {
+            Log.d(TAG, "BigMap stage=publish_dropped reason=epoch expected=$epoch current=$trackingEpoch " +
+                "tsNs=$timestampNs gen=$expectedGeneration rev=$expectedRevision")
         }
     }
 
@@ -675,6 +720,7 @@ class CaptureService : Service() {
         trackingJob?.cancel()
         trackingJob = null
         LiveTrackingStatus.publish(LiveTrackingState())
+        Log.d(TAG, "BigMap lifecycle=stop epoch=$trackingEpoch rev=$trackingRevision")
     }
 
     private fun reportError(message: String, durationMs: Long = 0) {

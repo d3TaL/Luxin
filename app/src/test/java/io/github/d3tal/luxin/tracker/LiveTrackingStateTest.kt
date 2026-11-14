@@ -84,6 +84,33 @@ class LiveTrackingStateTest {
         assertFalse(bigMapFrameIsCurrent(4, 4, 2, 2, 500, 100))
     }
 
+    @Test fun lateNativeGeometryRemainsInvalidAfterBriefPauseAndResume() {
+        val startedRevision = 7L
+        val generation = 2L
+        val frameNs = 10_000_000_000L
+        // Visibility returns before native completion, with a still-young frame.
+        // Decode succeeds, but that must never substitute for the publication guard.
+        val resumedRevision = startedRevision + 1
+        val decoded = BigMapGeometryDecoder.decode("""{"mode":"found","phase":"tracking",
+            "space":"twt702","reference":"test","matrix":[1.0,0.0,0.0,0.0,1.0,0.0],
+            "frameWidth":1560,"frameHeight":720,"timestampSeconds":10.0,
+            "inliers":24,"matches":30,"errorPx":0.5,"support":0.4}""")
+        assertNotNull(decoded.geometry)
+        assertFalse(bigMapFrameIsCurrent(startedRevision, resumedRevision, generation, generation,
+            frameNs, frameNs + 200_000_000))
+        // Only work started in the resumed revision is eligible again.
+        assertTrue(bigMapFrameIsCurrent(resumedRevision, resumedRevision, generation, generation,
+            frameNs + 250_000_000, frameNs + 300_000_000))
+    }
+
+    @Test fun lateFrameFromStoppedCaptureCannotPassRestartedGeneration() {
+        // Predicate regression only: CaptureService's separate epoch/cancellation gates
+        // still require Android runtime coverage for a tracker-only Stop/Start.
+        val frameNs = 10_000_000_000L
+        assertFalse(bigMapFrameIsCurrent(7, 7, 2, 3, frameNs, frameNs + 100_000_000))
+        assertTrue(bigMapFrameIsCurrent(7, 7, 3, 3, frameNs + 150_000_000, frameNs + 200_000_000))
+    }
+
     @Test fun geometryExpiryUsesFrameTimeNotPublicationTime() {
         assertEquals(850L, bigMapGeometryRemainingMs(10.0, 10_150_000_000L))
         assertEquals(0L, bigMapGeometryRemainingMs(10.0, 11_000_000_001L))

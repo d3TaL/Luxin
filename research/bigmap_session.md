@@ -81,6 +81,59 @@ JNI лог `LuxinTrackerJNI`: phase/mode, был ли absolute-поиск, featu
 follow ms, число SIFT-признаков. `LuxinCapture`: phase/mode, полное nativeMs и возраст кадра.
 HUD показывает confirming/moving/tracking и не получает матрицу на первых двух стадиях.
 
+### Адресная телеметрия отказа follow (diagnostic-only)
+
+Лог не меняет пороги, решения, early return, cooldown, timeout опоры, JNI JSON и проверки
+публикации. Никакие изображения/кропы/UID/тексты OCR не сохраняются. Это диагностика
+причины потери опоры, **не исправление** чувствительности к сдвигу/зуму.
+
+- `LuxinCapture stage=begin/native_return/checked`: `epoch`, `ts` (секунды с 9 знаками),
+  исходный `tsNs`, `gen`, `rev`, размеры. JNI использует то же `ts`; пары сопоставляются
+  по `(logcat pid/tid, ts)`: между begin, синхронным JNI и native_return нет suspension.
+  При чтении logcat следует сохранить thread id (например `-v threadtime -v monotonic`).
+  Это различает также перекрывающиеся старый/новый epoch при Stop/Start. Вывод native_return
+  ещё **не означает публикацию**. Следом по-прежнему проверяются отмена, размер, возраст,
+  revision и epoch. `stage=publish` показывает `obsolete/blocked/geometry`.
+- `LuxinTrackerJNI BigMap stage=before_absolute`: синхронный диагностический observer
+  вызывается **перед** `registerBigMap`, поэтому первая причина отказа и метрики видны до
+  долгого повторного SIFT. `stage=return` содержит окончательную фазу. На cooldown без SIFT
+  observer не вызывается: причина будет в `stage=return`, `throttled=1`. До SIFT поля
+  `phase=acquiring/mode=rejected` и нулевые SIFT-счётчики — ещё не итог абсолютного поиска.
+- `follow`: `not_attempted`, `accepted`, либо первая не пройденная проверка:
+  `insufficient_descriptors`, `insufficient_matches`, `invalid_transform`, `scale_bounds`,
+  `rotation_bounds`, `insufficient_inliers`, `inlier_ratio`, `grid_support`,
+  `reprojection_error`, `hull_support`, `overlap`, `dense_change`, `tile_change`,
+  `controls_change`. Несколько нарушений не переопределяют первую причину.
+- `BigMapFollow`: ORB keypoints/descriptors, matches/inliers, доля inliers, grid/hull,
+  средняя ошибка, масштаб/угол, overlap, global changed fraction, число пройденных плиток,
+  худшая **из пройденных** плиток (rect, changed/valid/fraction). На `tile_change`
+  это первая нарушившая порог плитка; более поздние плитки не вычисляются.
+- `BigMapControl`: ROI `0`/`1`, rect, mean delta, число пикселей с delta >24 и их доля.
+  `-1` у метрики означает «не вычислено», а не нулевую ошибку. После первой неудачи
+  следующие ROI/этапы не вычисляются. Rect/ошибка/движение — пиксели рабочего изображения
+  высотой **не более 720**, доли — 0..1, угол — градусы (со знаком, вычислен при `scale >= 0`).
+- `reset=follow_failed/frame_size/observation_gap/invalid_input_or_timestamp/composed_transform`,
+  `anchorAgeS/gapS/sinceAttemptS` (до сброса), `movementPx/stable` и `anchorExpired`.
+  Истечение опоры всегда пропускало follow, но само по себе не делало reset: лог это различает.
+  Внешние сбросы JNI логируются отдельно; Kotlin показывает причины waiting, revision/generation,
+  UI-gate, visibility, snapshot, expiry и Start/Stop/cancellation.
+  Первый вызов новой/reset-сессии тоже имеет `reset=frame_size` (размер до вызова был 0×0);
+  это не доказательство поворота экрана — фактическую смену показывают Kotlin gen/размеры.
+- Времена разделены: `readMs` (acquire/copy RGBA), `bitmapMs` (создание/заполнение Bitmap),
+  `gateMs` (UI-gate), `convertMs` (Bitmap → BGR), `followMs`, SIFT
+  `features/match/validate`, `sessionMs` (вся update, включая pre-SIFT лог), Kotlin
+  `callDecodeMs`/`nativeMs` и возраст кадра. Они не являются измерением задержки отрисовки,
+  а дополнительный лог имеет собственную накладную стоимость; влияние на устройство не измерено.
+  Паузы, таймауты и freshness-пороги не изменены, но накладные расходы диагностики могут
+  повлиять на фактическую частоту и возраст результатов у самой границы допуска.
+
+Для следующего **самостоятельно установленного пользователем** APK: дождаться tracking,
+сделать небольшой сдвиг, остановиться, затем зум/остановку. При разрешённом чтении логов
+нужны только теги `LuxinCapture:D LuxinTrackerJNI:I` с монотонным временем, без очистки
+буфера и без сохранения кадров. Сначала заново проверить `adb devices -l`; старый IP
+из предыдущего сеанса не переиспользовать вслепую. Android/JNI и фактическое появление
+этой телеметрии на телефоне требуют CI/нового APK и **NOT VERIFIED** одним desktop-прогоном.
+
 На сохранённом кадре пользователя, 8 настоящих эталонов с их масками: первый поиск
 2.59 с в одном нагруженном локальном прогоне, последующие повторения того же изображения
 23–24 мс; tracking после двух проверок. Это **не живое видео**, не Android-бюджет и не
@@ -101,3 +154,7 @@ tracker/build-debug/bigmap_geometry_frames --session --ref <png> <space> <upp> <
 Синтетические тесты: кандидат без матрицы, спокойное подтверждение, пауза долгого расчёта,
 сдвиг/зум и композиция координат, локальная смена картинки/контролов, неоднозначные пространства,
 таймаут абсолютной опоры, смена размера, потеря изображения и недопустимое время кадра.
+Регрессии телеметрии: first-failure плитки и каждого control ROI, `-1` у непройденных
+этапов, cooldown без observer, snapshot диагностики до SIFT, одинаковые решения/матрицы
+с observer и без него при одинаковом RNG. JVM-тесты дополнены сценарием позднего результата
+после краткой паузы/возврата и смены generation; это не Android Service/instrumentation-тест.

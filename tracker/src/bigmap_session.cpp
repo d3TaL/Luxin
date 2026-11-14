@@ -40,24 +40,40 @@ double cornerDistance(const cv::Mat& a, const cv::Mat& b, cv::Size size) {
 
 // Do not carry a surface alignment through a floor-button selection change. Conservative:
 // panel changes or moving scenery behind the controls may invalidate as well (safe reacquire).
-bool controlsUnchanged(const cv::Mat& anchor, const cv::Mat& current) {
+bool controlsUnchanged(const cv::Mat& anchor, const cv::Mat& current, BigMapFollowStats& stats) {
+    size_t index = 0;
     for (const auto& box : std::vector<cv::Rect>{{2790, 500, 170, 450}, {2020, 540, 120, 350}}) {
         cv::Rect rect(cvRound(box.x * anchor.cols / 3120.0), cvRound(box.y * anchor.rows / 1440.0),
             std::max(1, cvRound(box.width * anchor.cols / 3120.0)), std::max(1, cvRound(box.height * anchor.rows / 1440.0)));
         rect &= cv::Rect(0, 0, anchor.cols, anchor.rows);
         cv::Mat delta;
         cv::absdiff(anchor(rect), current(rect), delta);
-        if (cv::mean(delta)[0] > 6.0 || cv::countNonZero(delta > 24) > delta.total() * 0.04) return false;
+        auto& control = stats.controls[index++];
+        control.rect = rect;
+        control.mean_delta = cv::mean(delta)[0];
+        control.changed_pixels = cv::countNonZero(delta > 24);
+        control.pixels = static_cast<int>(delta.total());
+        if (control.pixels > 0) control.changed_fraction = double(control.changed_pixels) / control.pixels;
+        if (control.mean_delta > 6.0 || control.changed_pixels > delta.total() * 0.04) {
+            stats.outcome = "controls_change";
+            return false;
+        }
     }
     return true;
 }
 
 bool follow(const cv::Mat& anchor, const std::vector<cv::KeyPoint>& anchor_points,
-    const cv::Mat& anchor_descriptors, const cv::Mat& current, cv::Mat& transform) {
+    const cv::Mat& anchor_descriptors, const cv::Mat& current, cv::Mat& transform, BigMapFollowStats& stats) {
+    const auto reject = [&stats](const char* reason) { stats.outcome = reason; return false; };
+    stats.working_size = current.size();
+    stats.anchor_keypoints = static_cast<int>(anchor_points.size());
+    stats.anchor_descriptors = anchor_descriptors.rows;
     std::vector<cv::KeyPoint> keypoints;
     cv::Mat descriptors;
     features(current, keypoints, descriptors);
-    if (descriptors.rows < 2 || anchor_descriptors.rows < 2) return false;
+    stats.current_keypoints = static_cast<int>(keypoints.size());
+    stats.current_descriptors = descriptors.rows;
+    if (descriptors.rows < 2 || anchor_descriptors.rows < 2) return reject("insufficient_descriptors");
     cv::BFMatcher matcher(cv::NORM_HAMMING);
     std::vector<std::vector<cv::DMatch>> pairs;
     matcher.knnMatch(anchor_descriptors, descriptors, pairs, 2);
@@ -69,13 +85,17 @@ bool follow(const cv::Mat& anchor, const std::vector<cv::KeyPoint>& anchor_point
         from.push_back(anchor_points[pair[0].queryIdx].pt);
         to.push_back(keypoints[pair[0].trainIdx].pt);
     }
-    if (from.size() < 24) return false;
+    stats.matches = static_cast<int>(from.size());
+    if (from.size() < 24) return reject("insufficient_matches");
     cv::Mat inliers;
     transform = cv::estimateAffinePartial2D(from, to, inliers, cv::RANSAC, 1.5);
-    if (transform.empty() || !cv::checkRange(transform)) return false;
+    if (transform.empty() || !cv::checkRange(transform)) return reject("invalid_transform");
     const double scale = std::hypot(transform.at<double>(0, 0), transform.at<double>(1, 0));
     const double angle = std::atan2(transform.at<double>(1, 0), transform.at<double>(0, 0));
-    if (scale < 0.7 || scale > 1.4 || std::abs(angle) > CV_PI / 180.0) return false;
+    stats.scale = scale;
+    stats.angle_degrees = angle * 180.0 / CV_PI;
+    if (scale < 0.7 || scale > 1.4) return reject("scale_bounds");
+    if (std::abs(angle) > CV_PI / 180.0) return reject("rotation_bounds");
     std::vector<cv::Point2f> kept;
     std::set<std::pair<int, int>> occupied;
     double error = 0.0;
@@ -87,10 +107,19 @@ bool follow(const cv::Mat& anchor, const std::vector<cv::KeyPoint>& anchor_point
         const double y = transform.at<double>(1, 0) * from[i].x + transform.at<double>(1, 1) * from[i].y + transform.at<double>(1, 2);
         error += std::hypot(x - to[i].x, y - to[i].y);
     }
-    if (kept.size() < 24 || kept.size() < from.size() * 0.65 || occupied.size() < 4 || error / kept.size() > 0.8) return false;
+    stats.inliers = static_cast<int>(kept.size());
+    stats.inlier_ratio = double(kept.size()) / from.size();
+    stats.grid_cells = static_cast<int>(occupied.size());
+    if (!kept.empty()) stats.mean_error_px = error / kept.size();
+    if (kept.size() < 24) return reject("insufficient_inliers");
+    if (kept.size() < from.size() * 0.65) return reject("inlier_ratio");
+    if (occupied.size() < 4) return reject("grid_support");
+    if (error / kept.size() > 0.8) return reject("reprojection_error");
     std::vector<cv::Point2f> hull;
     cv::convexHull(kept, hull);
-    if (cv::contourArea(hull) < current.total() * 0.015) return false;
+    const double hull_area = cv::contourArea(hull);
+    stats.hull_fraction = hull_area / current.total();
+    if (hull_area < current.total() * 0.015) return reject("hull_support");
 
     // Dense appearance check prevents reusing geometry just because a handful of icons or
     // unchanged background features survive a floor/space switch. Masks must overlap.
@@ -98,20 +127,37 @@ bool follow(const cv::Mat& anchor, const std::vector<cv::KeyPoint>& anchor_point
     cv::warpAffine(anchor, warped, transform, current.size(), cv::INTER_LINEAR);
     cv::warpAffine(bigMapGeometryMask(anchor.size()), valid, transform, current.size(), cv::INTER_NEAREST);
     cv::bitwise_and(valid, bigMapGeometryMask(current.size()), valid);
-    if (cv::countNonZero(valid) < current.total() * 0.20) return false;
+    stats.overlap_pixels = cv::countNonZero(valid);
+    stats.overlap_fraction = double(stats.overlap_pixels) / current.total();
+    if (stats.overlap_pixels < current.total() * 0.20) return reject("overlap");
     cv::Mat delta;
     cv::absdiff(warped, current, delta);
     cv::Mat changed = (delta > 25) & valid;
-    if (cv::countNonZero(changed) > cv::countNonZero(valid) * 0.025) return false;
+    stats.changed_pixels = cv::countNonZero(changed);
+    stats.changed_fraction = double(stats.changed_pixels) / stats.overlap_pixels;
+    if (stats.changed_pixels > stats.overlap_pixels * 0.025) return reject("dense_change");
     // Local changes cannot be hidden by a large unchanged surface/background.
     for (int y = 0; y < current.rows; y += 90) {
         for (int x = 0; x < current.cols; x += 90) {
             const cv::Rect tile(x, y, std::min(90, current.cols - x), std::min(90, current.rows - y));
             const int count = cv::countNonZero(valid(tile));
-            if (count >= 200 && cv::countNonZero(changed(tile)) > count * 0.12) return false;
+            if (count >= 200) {
+                const int changed_count = cv::countNonZero(changed(tile));
+                const double fraction = double(changed_count) / count;
+                ++stats.tiles_evaluated;
+                if (fraction > stats.worst_tile_changed_fraction) {
+                    stats.worst_tile = tile;
+                    stats.worst_tile_valid_pixels = count;
+                    stats.worst_tile_changed_pixels = changed_count;
+                    stats.worst_tile_changed_fraction = fraction;
+                }
+                if (changed_count > count * 0.12) return reject("tile_change");
+            }
         }
     }
-    return controlsUnchanged(anchor, current);
+    if (!controlsUnchanged(anchor, current, stats)) return false;
+    stats.outcome = "accepted";
+    return true;
 }
 } // namespace
 
@@ -128,29 +174,41 @@ void BigMapSession::reset() {
 }
 
 BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
-    const std::vector<std::shared_ptr<LayerReference>>& refs, double timestamp) try {
+    const std::vector<std::shared_ptr<LayerReference>>& refs, double timestamp,
+    BigMapSessionDiagnosticSink before_absolute, void* diagnostic_context) try {
     BigMapSessionResult result;
+    if (std::isfinite(timestamp)) {
+        if (!anchor_gray_.empty()) result.anchor_age_seconds = timestamp - anchor_.timestamp_seconds;
+        if (previous_timestamp_ >= 0) result.observation_gap_seconds = timestamp - previous_timestamp_;
+        if (last_attempt_ >= 0) result.since_attempt_seconds = timestamp - last_attempt_;
+    }
     if (frame.empty() || frame.cols <= frame.rows || (frame.type() != CV_8UC1 && frame.type() != CV_8UC3) ||
         !std::isfinite(timestamp) || timestamp < 0 || (previous_timestamp_ >= 0 && timestamp <= previous_timestamp_)) {
         reset();
+        result.reset_reason = "invalid_input_or_timestamp";
         result.phase = "rejected";
         return result;
     }
     // Absolute acquisition may itself take seconds. It is still only a candidate: a later
     // fresh frame must pass all follow checks, never just receive an updated timestamp.
-    if (frame_size_ != frame.size() || (previous_timestamp_ >= 0 && timestamp - previous_timestamp_ > 10.0)) reset();
+    if (frame_size_ != frame.size() || (previous_timestamp_ >= 0 && timestamp - previous_timestamp_ > 10.0)) {
+        result.reset_reason = frame_size_ != frame.size() ? "frame_size" : "observation_gap";
+        reset();
+    }
     frame_size_ = frame.size();
     previous_timestamp_ = timestamp;
     auto current = smallGray(frame);
     if (!anchor_gray_.empty() && timestamp - anchor_.timestamp_seconds <= 10.0) {
         const auto start = Clock::now();
         cv::Mat transform;
-        const bool ok = follow(anchor_gray_, anchor_keypoints_, anchor_descriptors_, current, transform);
+        const bool ok = follow(anchor_gray_, anchor_keypoints_, anchor_descriptors_, current, transform, result.follow);
         result.follow_ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
         if (ok) {
             const double movement = previous_transform_.empty() ? 100.0 : cornerDistance(transform, previous_transform_, current.size());
             previous_transform_ = transform.clone();
             stable_frames_ = movement <= 0.6 ? stable_frames_ + 1 : 0;
+            result.movement_px = movement;
+            result.stable_frames = stable_frames_;
             result.phase = stable_frames_ >= 2 ? "tracking" : movement <= 0.6 ? "confirming" : "moving";
             if (stable_frames_ >= 2) {
                 // small-current <- small-anchor <- original-anchor <- Kongying.
@@ -169,6 +227,7 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
                 result.geometry.timestamp_seconds = timestamp;
                 if (!cv::checkRange(result.geometry.matrix) || !std::isfinite(a * a + b * b) || a * a + b * b <= 1e-16) {
                     reset();
+                    result.reset_reason = "composed_transform";
                     result.geometry = {};
                     result.phase = "rejected";
                 }
@@ -179,13 +238,18 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
         anchor_gray_.release();
         previous_transform_.release();
         stable_frames_ = 0;
+        result.reset_reason = "follow_failed";
     }
+    // Expiry has always skipped follow without resetting the session here.
+    result.anchor_expired = !anchor_gray_.empty() && timestamp - anchor_.timestamp_seconds > 10.0;
     if (last_attempt_ >= 0 && timestamp - last_attempt_ < 2.0) {
+        result.absolute_throttled = true;
         result.phase = "acquiring";
         return result;
     }
     result.absolute_attempted = true;
     last_attempt_ = timestamp;
+    if (before_absolute) before_absolute(result, diagnostic_context);
     auto absolute = registerBigMap(frame, refs, timestamp, &result.registration);
     result.phase = absolute.mode;
     if (absolute.mode != "found") {
