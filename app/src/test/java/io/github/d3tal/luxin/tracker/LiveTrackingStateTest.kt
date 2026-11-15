@@ -111,6 +111,25 @@ class LiveTrackingStateTest {
         assertTrue(bigMapFrameIsCurrent(7, 7, 3, 3, frameNs + 150_000_000, frameNs + 200_000_000))
     }
 
+    @Test fun acquisitionSettlingNeverMakesGeometryCurrentAcrossPauseOrRestart() {
+        // Settling is only a native scheduling gate, not permission to publish a matrix.
+        val acquiring = BigMapGeometryDecoder.decode("""{"mode":"rejected","phase":"acquiring"}""")
+        assertNull(acquiring.geometry)
+        assertEquals("acquiring", acquiring.phase)
+        val frameNs = 10_000_000_000L
+        val decoded = BigMapGeometryDecoder.decode("""{"mode":"found","phase":"tracking",
+            "space":"twt702","reference":"settled-test","matrix":[1.0,0.0,0.0,0.0,1.0,0.0],
+            "frameWidth":1560,"frameHeight":720,"timestampSeconds":10.0,
+            "inliers":24,"matches":30,"errorPx":0.5,"support":0.4}""")
+        assertNotNull(decoded.geometry)
+        // A brief hide/show after settling and before native completion changes revision.
+        assertFalse(bigMapFrameIsCurrent(7, 8, 2, 2, frameNs, frameNs + 200_000_000))
+        // Capture Stop/Start also changes generation; the old result stays ineligible.
+        assertFalse(bigMapFrameIsCurrent(7, 8, 2, 3, frameNs, frameNs + 200_000_000))
+        // Neither settling nor successful decoding extends the one-second frame lifetime.
+        assertFalse(bigMapFrameIsCurrent(8, 8, 3, 3, frameNs, frameNs + 1_000_000_001))
+    }
+
     @Test fun geometryExpiryUsesFrameTimeNotPublicationTime() {
         assertEquals(850L, bigMapGeometryRemainingMs(10.0, 10_150_000_000L))
         assertEquals(0L, bigMapGeometryRemainingMs(10.0, 11_000_000_001L))

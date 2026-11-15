@@ -69,6 +69,12 @@ struct BigMapSessionResult {
     bool absolute_throttled = false;
     bool appearance_suspended = false; // internal candidate retained, no geometry output
     int suspended_still_frames = 0;
+    // Scheduling evidence only, fixed settling-origin -> current; never composed/published.
+    BigMapFollowStats acquisition_follow;
+    double acquisition_follow_ms = 0.0;
+    double acquisition_movement_px = -1.0;
+    int acquisition_still_frames = 0;
+    double acquisition_still_seconds = 0.0;
 };
 
 // Synchronous, diagnostic-only observer immediately BEFORE registerBigMap can block.
@@ -77,7 +83,8 @@ struct BigMapSessionResult {
 using BigMapSessionDiagnosticSink = void (*)(const BigMapSessionResult&, void*) noexcept;
 
 // Diagnostics only. No floor decision or permission to render item markers.
-// Every follow transform is measured directly against an absolute anchor, never chained.
+// Published geometry uses a direct absolute-anchor follow, never chained. Separate
+// fixed settling-origin transforms may schedule SIFT but never contribute to geometry.
 class BigMapSession {
 public:
     void reset();
@@ -97,6 +104,12 @@ private:
     int stable_frames_ = 0;
     bool appearance_suspended_ = false;
     int suspended_still_frames_ = 0;
+    cv::Mat acquisition_gray_;
+    std::vector<cv::KeyPoint> acquisition_keypoints_;
+    cv::Mat acquisition_descriptors_;
+    double acquisition_timestamp_ = -1.0;
+    double acquisition_last_timestamp_ = -1.0;
+    int acquisition_still_frames_ = 0;
 };
 
 } // namespace luxin

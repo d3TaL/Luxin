@@ -197,6 +197,12 @@ void BigMapSession::reset() {
     stable_frames_ = 0;
     appearance_suspended_ = false;
     suspended_still_frames_ = 0;
+    acquisition_gray_.release();
+    acquisition_keypoints_.clear();
+    acquisition_descriptors_.release();
+    acquisition_timestamp_ = -1.0;
+    acquisition_last_timestamp_ = -1.0;
+    acquisition_still_frames_ = 0;
 }
 
 BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
@@ -298,8 +304,39 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
     }
     // Expiry has always skipped follow without resetting the session here.
     result.anchor_expired = !anchor_gray_.empty() && timestamp - anchor_.timestamp_seconds > 10.0;
-    if (last_attempt_ >= 0 && timestamp - last_attempt_ < 2.0) {
-        result.absolute_throttled = true;
+    // An absolute anchor captured mid-zoom can keep producing noisy anchor-relative
+    // transforms long after the gesture ends. Schedule SIFT only on a settled image.
+    // This independent evidence NEVER supplies geometry or refreshes an absolute anchor.
+    // Keep a FIXED settling origin: <=0.6px is total motion, not a per-frame allowance
+    // that would certify slow pan/zoom at 60fps. Require at least two full follow passes
+    // and a continuous 0.5s PTS span, with no observation gap >1s. This is an acquisition
+    // scheduling guard, not a proof that the user has finished every possible gesture.
+    bool settled = false;
+    if (!acquisition_gray_.empty() && timestamp - acquisition_last_timestamp_ <= 1.0) {
+        cv::Mat step;
+        const auto start = Clock::now();
+        const bool accepted = follow(acquisition_gray_, acquisition_keypoints_, acquisition_descriptors_,
+            current, step, result.acquisition_follow);
+        result.acquisition_follow_ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+        if (result.acquisition_follow.geometry_accepted) {
+            const cv::Mat identity = (cv::Mat_<double>(2, 3) << 1, 0, 0, 0, 1, 0);
+            result.acquisition_movement_px = cornerDistance(step, identity, current.size());
+        }
+        settled = accepted && result.acquisition_movement_px <= 0.6;
+    }
+    if (settled) {
+        acquisition_still_frames_ = std::min(2, acquisition_still_frames_ + 1);
+        result.acquisition_still_seconds = timestamp - acquisition_timestamp_;
+    } else {
+        acquisition_gray_ = current;
+        features(current, acquisition_keypoints_, acquisition_descriptors_);
+        acquisition_timestamp_ = timestamp;
+        acquisition_still_frames_ = 0;
+    }
+    acquisition_last_timestamp_ = timestamp;
+    result.acquisition_still_frames = acquisition_still_frames_;
+    result.absolute_throttled = last_attempt_ >= 0 && timestamp - last_attempt_ < 2.0;
+    if (acquisition_still_frames_ < 2 || result.acquisition_still_seconds < 0.5 || result.absolute_throttled) {
         result.phase = "acquiring";
         return result;
     }
@@ -319,6 +356,13 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
     stable_frames_ = 0;
     appearance_suspended_ = false;
     suspended_still_frames_ = 0;
+    // Do not reuse pre-search settling observations after tracking or a blocking SIFT.
+    acquisition_gray_.release();
+    acquisition_keypoints_.clear();
+    acquisition_descriptors_.release();
+    acquisition_timestamp_ = -1.0;
+    acquisition_last_timestamp_ = -1.0;
+    acquisition_still_frames_ = 0;
     result.phase = "confirming";
     // The absolute result remains an internal candidate even when computation was fast.
     return result;

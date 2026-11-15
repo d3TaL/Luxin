@@ -117,7 +117,8 @@ void logBigMapDiagnostics(const luxin::BigMapSessionResult& result,
     LOGI("BigMap stage=%s ts=%.9f frame=%dx%d phase=%s mode=%s absolute=%d throttled=%d "
         "reset=%s anchorExpired=%d anchorAgeS=%.3f gapS=%.3f sinceAttemptS=%.3f "
         "follow=%s sparseOk=%d suspended=%d suspendedStill=%d followMs=%.1f movementPx=%.3f stable=%d convertMs=%.1f "
-        "features=%.1f match=%.1f validate=%.1f ms keypoints=%d sessionMs=%.1f",
+        "features=%.1f match=%.1f validate=%.1f ms keypoints=%d sessionMs=%.1f "
+        "settle=%s settleMovementPx=%.3f settleStill=%d settleSpanS=%.3f settleMs=%.1f",
         stage, context.timestamp, context.width, context.height, result.phase.c_str(),
         result.geometry.mode.c_str(), result.absolute_attempted, result.absolute_throttled,
         result.reset_reason, result.anchor_expired, result.anchor_age_seconds,
@@ -125,7 +126,9 @@ void logBigMapDiagnostics(const luxin::BigMapSessionResult& result,
         f.geometry_accepted, result.appearance_suspended, result.suspended_still_frames,
         result.follow_ms, result.movement_px, result.stable_frames, context.conversion_ms,
         result.registration.features_ms, result.registration.matching_ms,
-        result.registration.validation_ms, result.registration.query_features, session_ms);
+        result.registration.validation_ms, result.registration.query_features, session_ms,
+        result.acquisition_follow.outcome, result.acquisition_movement_px,
+        result.acquisition_still_frames, result.acquisition_still_seconds, result.acquisition_follow_ms);
     if (f.current_keypoints < 0) return; // follow was not attempted
     LOGI("BigMapFollow stage=%s ts=%.9f outcome=%s work=%dx%d kp=%d/%d desc=%d/%d "
         "matches=%d inliers=%d ratio=%.5f grid=%d errorPx=%.4f scale=%.5f angleDeg=%.4f "

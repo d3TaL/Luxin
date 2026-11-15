@@ -2,6 +2,7 @@
 #include <array>
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -21,6 +22,24 @@ void recordBeforeAbsolute(const BigMapSessionResult& result, void* context) noex
     if (log && log->count < log->observations.size()) {
         log->observations[log->count++] = result;
     }
+}
+
+// Explicit fixture setup: two still checks spanning 0.5s precede the requested SIFT frame.
+// Never use this helper to test failure/reset behavior; those transitions are exercised below.
+BigMapSessionResult acquireSettled(BigMapSession& session, const cv::Mat& frame,
+    const std::vector<std::shared_ptr<LayerReference>>& refs, double timestamp,
+    BigMapSessionDiagnosticSink sink = nullptr, void* context = nullptr) {
+    const auto first = session.update(frame, refs, timestamp - 0.5, sink, context);
+    assert(!first.absolute_attempted && first.geometry.matrix.empty());
+    assert(first.acquisition_still_frames == 0);
+    const auto second = session.update(frame, refs, timestamp - 0.25, sink, context);
+    assert(!second.absolute_attempted && second.geometry.matrix.empty());
+    assert(second.acquisition_still_frames == 1);
+    auto result = session.update(frame, refs, timestamp, sink, context);
+    assert(result.absolute_attempted && result.geometry.matrix.empty());
+    assert(result.acquisition_still_frames == 2);
+    assert(result.acquisition_still_seconds >= 0.5);
+    return result;
 }
 
 void assertControlUnvisited(const BigMapControlStats& control) {
@@ -186,6 +205,17 @@ void assertResultsEquivalent(const BigMapSessionResult& a, const BigMapSessionRe
     assert(a.follow.geometry_accepted == b.follow.geometry_accepted);
     assert(a.appearance_suspended == b.appearance_suspended);
     assert(a.suspended_still_frames == b.suspended_still_frames);
+    assert(a.acquisition_movement_px == b.acquisition_movement_px);
+    assert(a.acquisition_still_frames == b.acquisition_still_frames);
+    assert(a.acquisition_still_seconds == b.acquisition_still_seconds);
+    // Compare every acquisition-follow diagnostic through the same equality checks.
+    // The recursive calls have default (unvisited) acquisition diagnostics.
+    if (a.acquisition_follow.current_keypoints >= 0 || b.acquisition_follow.current_keypoints >= 0) {
+        BigMapSessionResult x, y;
+        x.follow = a.acquisition_follow;
+        y.follow = b.acquisition_follow;
+        assertResultsEquivalent(x, y);
+    }
 }
 
 void assertPreSiftSinkShape(const BigMapSessionResult& observed) {
@@ -199,6 +229,10 @@ void assertPreSiftSinkShape(const BigMapSessionResult& observed) {
     assert(observed.registration.validation_ms == 0.0);
     assert(observed.registration.extraction_width == 0);
     assert(observed.registration.extraction_height == 0);
+    assert(observed.acquisition_still_frames == 2);
+    assert(observed.acquisition_still_seconds >= 0.5);
+    assertFollowAccepted(observed.acquisition_follow, observed.acquisition_follow.working_size);
+    assert(observed.acquisition_movement_px <= 0.6);
 }
 
 void testFollowDiagnosticsAndObserver(const cv::Mat& frame, const std::shared_ptr<LayerReference>& ref) {
@@ -206,7 +240,7 @@ void testFollowDiagnosticsAndObserver(const cv::Mat& frame, const std::shared_pt
     BigMapSession session;
     DiagnosticSinkLog sink;
 
-    auto acquired = session.update(frame, {ref}, 1.0, recordBeforeAbsolute, &sink);
+    auto acquired = acquireSettled(session, frame, {ref}, 1.0, recordBeforeAbsolute, &sink);
     assert(sink.count == 1);
     assertPreSiftSinkShape(sink.observations[0]);
     assert(!sink.observations[0].anchor_expired);
@@ -241,9 +275,8 @@ void testFollowDiagnosticsAndObserver(const cv::Mat& frame, const std::shared_pt
         for (int x = 0; x < tile_roi.cols; ++x) row[x] = row[x] > 127 ? 0 : 255;
     }
     auto tile_reacquire = session.update(tile_edit, {ref}, 3.5, recordBeforeAbsolute, &sink);
-    assert(sink.count == 2);
-    const auto& pre_tile = sink.observations[1];
-    assertPreSiftSinkShape(pre_tile);
+    assert(sink.count == 1); // The failed observation only starts a new settling interval.
+    const auto& pre_tile = tile_reacquire;
     assert(!pre_tile.anchor_expired && std::string(pre_tile.reset_reason) == "follow_failed");
     assert(pre_tile.anchor_age_seconds == 2.5 && pre_tile.observation_gap_seconds == 1.5);
     assert(pre_tile.since_attempt_seconds == 2.5);
@@ -258,13 +291,17 @@ void testFollowDiagnosticsAndObserver(const cv::Mat& frame, const std::shared_pt
     assert(pre_tile.follow.worst_tile_changed_fraction > 0.12);
     assertControlUnvisited(pre_tile.follow.controls[0]);
     assertControlUnvisited(pre_tile.follow.controls[1]);
-    assert(tile_reacquire.absolute_attempted && tile_reacquire.registration.query_features > 0);
-    assert(tile_reacquire.phase == "confirming" && std::string(tile_reacquire.reset_reason) == "follow_failed");
+    assert(!tile_reacquire.absolute_attempted && tile_reacquire.geometry.matrix.empty());
+    assert(tile_reacquire.phase == "acquiring" && std::string(tile_reacquire.reset_reason) == "follow_failed");
     assert(std::string(tile_reacquire.follow.outcome) == "tile_change");
+    assert(!session.update(tile_edit, {ref}, 3.75, recordBeforeAbsolute, &sink).absolute_attempted);
+    assert(session.update(tile_edit, {ref}, 4.0, recordBeforeAbsolute, &sink).absolute_attempted);
+    assert(sink.count == 2);
+    assertPreSiftSinkShape(sink.observations[1]);
 
     // Textureless failure during 2s cooldown: no sink invocation, later follow stages stay unvisited.
     cv::Mat blank(frame.size(), CV_8UC1, cv::Scalar(0));
-    auto throttled_follow_fail = session.update(blank, {ref}, 4.0, recordBeforeAbsolute, &sink);
+    auto throttled_follow_fail = session.update(blank, {ref}, 4.1, recordBeforeAbsolute, &sink);
     assert(sink.count == 2);
     assert(throttled_follow_fail.absolute_throttled && !throttled_follow_fail.absolute_attempted);
     assert(throttled_follow_fail.phase == "acquiring" && throttled_follow_fail.registration.query_features == 0);
@@ -279,17 +316,18 @@ void testFollowDiagnosticsAndObserver(const cv::Mat& frame, const std::shared_pt
     assertFollowNotAttempted(throttled_no_anchor.follow);
 
     // Reacquire outside cooldown, then fail follow on textureless frame outside cooldown.
-    auto reacquired = session.update(frame, {ref}, 6.0, recordBeforeAbsolute, &sink);
+    auto reacquired = acquireSettled(session, frame, {ref}, 6.1, recordBeforeAbsolute, &sink);
     assert(sink.count == 3);
     assert(reacquired.phase == "confirming");
 
     auto blank_reacquire = session.update(blank, {ref}, 8.5, recordBeforeAbsolute, &sink);
-    assert(sink.count == 4);
-    const auto& pre_blank = sink.observations[3];
-    assertPreSiftSinkShape(pre_blank);
+    assert(sink.count == 3);
+    const auto& pre_blank = blank_reacquire;
     assert(std::string(pre_blank.reset_reason) == "follow_failed");
     assertFollowInsufficientDescriptors(pre_blank.follow, frame.size());
-    assert(blank_reacquire.phase == "rejected" && blank_reacquire.registration.query_features == 0);
+    assert(blank_reacquire.phase == "acquiring" && !blank_reacquire.absolute_attempted);
+    assert(!session.update(blank, {ref}, 8.6, recordBeforeAbsolute, &sink).absolute_attempted);
+    assert(!session.update(blank, {ref}, 8.7, recordBeforeAbsolute, &sink).absolute_attempted);
     assert(std::string(blank_reacquire.reset_reason) == "follow_failed");
     assertFollowInsufficientDescriptors(blank_reacquire.follow, frame.size());
 }
@@ -299,16 +337,15 @@ void testControlRoiFailures(const cv::Mat& frame, const std::shared_ptr<LayerRef
     cv::setRNGSeed(202);
     BigMapSession session0;
     DiagnosticSinkLog sink0;
-    assert(session0.update(frame, {ref}, 1.0, recordBeforeAbsolute, &sink0).phase == "confirming");
+    assert(acquireSettled(session0, frame, {ref}, 1.0, recordBeforeAbsolute, &sink0).phase == "confirming");
     auto clean = session0.update(frame, {ref}, 1.5, recordBeforeAbsolute, &sink0);
     const int clean_tiles = clean.follow.tiles_evaluated;
 
     cv::Mat ctrl0_edit = frame.clone();
     ctrl0_edit(cv::Rect(1395, 250, 85, 225)).setTo(255);
     auto fail0 = session0.update(ctrl0_edit, {ref}, 3.5, recordBeforeAbsolute, &sink0);
-    assert(sink0.count == 2);
-    const auto& pre0 = sink0.observations[1];
-    assertPreSiftSinkShape(pre0);
+    assert(sink0.count == 1 && !fail0.absolute_attempted && fail0.geometry.matrix.empty());
+    const auto& pre0 = fail0;
     assert(std::string(pre0.reset_reason) == "follow_failed");
     assert(std::string(pre0.follow.outcome) == "controls_change");
     assert(pre0.follow.tiles_evaluated == clean_tiles);
@@ -320,21 +357,20 @@ void testControlRoiFailures(const cv::Mat& frame, const std::shared_ptr<LayerRef
     assert(pre0.follow.controls[0].changed_fraction > 0.04);
     assertControlUnvisited(pre0.follow.controls[1]);
     assert(std::string(fail0.follow.outcome) == "controls_change");
-    assert(fail0.registration.query_features > 0);
+    assert(fail0.registration.query_features == 0);
 
     // Second control ROI failure: controls[0] passes, controls[1] fails.
     cv::setRNGSeed(202);
     BigMapSession session1;
     DiagnosticSinkLog sink1;
-    assert(session1.update(frame, {ref}, 1.0, recordBeforeAbsolute, &sink1).phase == "confirming");
+    assert(acquireSettled(session1, frame, {ref}, 1.0, recordBeforeAbsolute, &sink1).phase == "confirming");
     assert(std::string(session1.update(frame, {ref}, 1.5, recordBeforeAbsolute, &sink1).follow.outcome) == "accepted");
 
     cv::Mat ctrl1_edit = frame.clone();
     ctrl1_edit(cv::Rect(1010, 270, 60, 175)).setTo(255);
     auto fail1 = session1.update(ctrl1_edit, {ref}, 3.5, recordBeforeAbsolute, &sink1);
-    assert(sink1.count == 2);
-    const auto& pre1 = sink1.observations[1];
-    assertPreSiftSinkShape(pre1);
+    assert(sink1.count == 1 && !fail1.absolute_attempted && fail1.geometry.matrix.empty());
+    const auto& pre1 = fail1;
     assert(std::string(pre1.reset_reason) == "follow_failed");
     assert(std::string(pre1.follow.outcome) == "controls_change");
     assert(pre1.follow.tiles_evaluated == clean_tiles);
@@ -349,7 +385,7 @@ void testControlRoiFailures(const cv::Mat& frame, const std::shared_ptr<LayerRef
     assert(pre1.follow.controls[1].changed_pixels > pre1.follow.controls[1].pixels * 0.04);
     assert(pre1.follow.controls[1].changed_fraction > 0.04);
     assert(std::string(fail1.follow.outcome) == "controls_change");
-    assert(fail1.registration.query_features > 0);
+    assert(fail1.registration.query_features == 0);
 }
 
 void testObserverEquivalenceAndSessionResets(
@@ -368,7 +404,8 @@ void testObserverEquivalenceAndSessionResets(
         double timestamp;
     };
     const std::vector<Step> steps = {
-        {&frame, 1.0},       // sink 0: initial acquire
+        {&frame, 0.5}, {&frame, 0.75},
+        {&frame, 1.0},       // sink 0: settled initial acquire
         {&frame, 1.5},       // follow accepted (confirming)
         {&frame, 2.0},       // follow accepted (tracking)
         {&shifted, 2.5},     // follow accepted (moving)
@@ -376,14 +413,16 @@ void testObserverEquivalenceAndSessionResets(
         {&shifted, 3.5},     // follow accepted (tracking)
         {&ctrl0_edit, 4.0},  // appearance failure + measured movement: suspended, no geometry
         {&ctrl0_edit, 4.2},  // first stationary appearance failure
-        {&ctrl0_edit, 4.4},  // sink 1: second still failure => discard + reacquire
-        {&frame, 4.5},       // controls_change while stationary, throttled, no sink
-        {&frame, 6.5},       // sink 2: reacquire after cooldown
+        {&ctrl0_edit, 4.4},  // second still failure => discard, begin settling
+        {&ctrl0_edit, 4.65}, {&ctrl0_edit, 4.9}, // sink 1: new settled search
+        {&frame, 5.0},       // controls_change while stationary, throttled, no sink
+        {&frame, 6.5}, {&frame, 6.75},
+        {&frame, 7.0},       // sink 2: settled reacquire after cooldown
         {&frame, 15.0},      // follow accepted within 10s
-        {&frame, 17.0},      // sink 3: anchor_expired (>10s), reset_reason=none
-        {&frame, 28.0},      // sink 4: observation_gap (>10s)
-        {&resized, 30.5},    // sink 5: frame_size reset
-        {&invalid_rgba, 31.0} // invalid_input_or_timestamp, no sink
+        {&frame, 17.1}, {&frame, 17.35}, {&frame, 17.6}, // sink 3: expired anchor, settled refresh
+        {&frame, 28.0}, {&frame, 28.25}, {&frame, 28.5}, // sink 4: observation gap then settling
+        {&resized, 30.5}, {&resized, 30.75}, {&resized, 31.0}, // sink 5: resize then settling
+        {&invalid_rgba, 31.1} // invalid_input_or_timestamp, no sink
     };
 
     auto run_sequence = [&](BigMapSessionDiagnosticSink sink_fn, DiagnosticSinkLog* sink_log) {
@@ -411,28 +450,30 @@ void testObserverEquivalenceAndSessionResets(
         assertPreSiftSinkShape(sink.observations[i]);
     }
     assert(std::string(sink.observations[0].follow.outcome) == "not_attempted");
-    assert(std::string(sink.observations[1].reset_reason) == "follow_failed");
-    assert(std::string(sink.observations[1].follow.outcome) == "controls_change");
+    assertFollowNotAttempted(sink.observations[1].follow);
     assert(sink.observations[3].anchor_expired);
     assert(std::string(sink.observations[3].reset_reason) == "none");
     assertFollowNotAttempted(sink.observations[3].follow);
-    assert(sink.observations[3].anchor_age_seconds == 10.5);
+    assert(std::abs(sink.observations[3].anchor_age_seconds - 10.6) < 1e-6);
     assert(!sink.observations[4].anchor_expired);
-    assert(std::string(sink.observations[4].reset_reason) == "observation_gap");
-    assert(sink.observations[4].observation_gap_seconds == 11.0);
+    assert(std::string(sink.observations[4].reset_reason) == "none");
     assert(!sink.observations[5].anchor_expired);
-    assert(std::string(sink.observations[5].reset_reason) == "frame_size");
+    assert(std::string(sink.observations[5].reset_reason) == "none");
 
-    assert(observed[6].appearance_suspended && observed[6].phase == "moving");
-    assert(!observed[6].absolute_attempted && observed[6].geometry.matrix.empty());
-    assert(observed[7].suspended_still_frames == 1 && observed[7].geometry.matrix.empty());
-    assert(observed[9].absolute_throttled && !observed[9].absolute_attempted);
-    assert(std::string(observed[9].reset_reason) == "follow_failed");
-    assert(observed[12].anchor_expired && std::string(observed[12].reset_reason) == "none");
-    assert(std::string(observed[13].reset_reason) == "observation_gap");
-    assert(std::string(observed[14].reset_reason) == "frame_size");
-    assert(observed[15].phase == "rejected" && std::string(observed[15].reset_reason) == "invalid_input_or_timestamp");
-    assert(!observed[15].absolute_attempted);
+    const auto at = [&](double t) -> const BigMapSessionResult& {
+        for (size_t i = 0; i < steps.size(); ++i) if (steps[i].timestamp == t) return observed[i];
+        std::abort();
+    };
+    assert(at(4.0).appearance_suspended && at(4.0).phase == "moving");
+    assert(!at(4.0).absolute_attempted && at(4.0).geometry.matrix.empty());
+    assert(at(4.2).suspended_still_frames == 1 && at(4.2).geometry.matrix.empty());
+    assert(at(5.0).absolute_throttled && !at(5.0).absolute_attempted);
+    assert(std::string(at(5.0).reset_reason) == "follow_failed");
+    assert(at(17.1).anchor_expired && std::string(at(17.1).reset_reason) == "none");
+    assert(std::string(at(28.0).reset_reason) == "observation_gap");
+    assert(std::string(at(30.5).reset_reason) == "frame_size");
+    assert(at(31.1).phase == "rejected" && std::string(at(31.1).reset_reason) == "invalid_input_or_timestamp");
+    assert(!at(31.1).absolute_attempted);
 }
 
 void testMovingAppearanceIsNotPublished(const cv::Mat& frame, const std::shared_ptr<LayerReference>& ref) {
@@ -446,7 +487,7 @@ void testMovingAppearanceIsNotPublished(const cv::Mat& frame, const std::shared_
     cv::Mat anchor = frame.clone();
     draw_ui(anchor);
     BigMapSession session;
-    assert(session.update(anchor, {ref}, 1).phase == "confirming");
+    assert(acquireSettled(session, anchor, {ref}, 1).phase == "confirming");
     assert(!session.update(anchor, {ref}, 1.1).absolute_attempted);
     assert(session.update(anchor, {ref}, 1.2).geometry.mode == "found");
 
@@ -473,7 +514,7 @@ void testMovingAppearanceIsNotPublished(const cv::Mat& frame, const std::shared_
 
     // A transient map occlusion can clear. Two clean stationary checks are still required.
     session.reset();
-    assert(session.update(anchor, {ref}, 3).phase == "confirming");
+    assert(acquireSettled(session, anchor, {ref}, 3).phase == "confirming");
     session.update(anchor, {ref}, 3.1);
     assert(session.update(anchor, {ref}, 3.2).geometry.mode == "found");
     assert(session.update(changed, {ref}, 3.3).appearance_suspended);
@@ -491,7 +532,7 @@ void testMovingAppearanceIsNotPublished(const cv::Mat& frame, const std::shared_
 
     // Sparse failure while suspended is immediate rejection, never a moving fallback.
     session.reset();
-    session.update(anchor, {ref}, 5);
+    acquireSettled(session, anchor, {ref}, 5);
     session.update(anchor, {ref}, 5.1);
     session.update(anchor, {ref}, 5.2);
     assert(session.update(changed, {ref}, 5.3).appearance_suspended);
@@ -501,16 +542,17 @@ void testMovingAppearanceIsNotPublished(const cv::Mat& frame, const std::shared_
 
     // Pause/reset destroys a suspended candidate before a later observation can complete it.
     session.reset();
-    session.update(anchor, {ref}, 7);
+    acquireSettled(session, anchor, {ref}, 7);
     assert(session.update(changed, {ref}, 7.1).appearance_suspended);
     session.reset();
     const auto restarted = session.update(shifted, {ref}, 7.2);
-    assert(restarted.absolute_attempted && restarted.geometry.matrix.empty());
+    assert(!restarted.absolute_attempted && restarted.geometry.matrix.empty());
+    assert(restarted.acquisition_still_frames == 0);
     assert(std::string(restarted.follow.outcome) == "not_attempted" && !restarted.appearance_suspended);
 
     // A changed control during a real pan cannot be hidden by the suspension.
     session.reset();
-    session.update(anchor, {ref}, 8);
+    acquireSettled(session, anchor, {ref}, 8);
     session.update(anchor, {ref}, 8.1);
     session.update(anchor, {ref}, 8.2);
     cv::Mat control_changed = shifted.clone();
@@ -526,7 +568,7 @@ void testMovingAppearanceIsNotPublished(const cv::Mat& frame, const std::shared_
 
     // Suspension cannot refresh the 10-second absolute-anchor lifetime during continued motion.
     session.reset();
-    session.update(anchor, {ref}, 10);
+    acquireSettled(session, anchor, {ref}, 10);
     session.update(anchor, {ref}, 10.1);
     session.update(anchor, {ref}, 10.2);
     for (int i = 1; i <= 5; ++i) {
@@ -538,7 +580,8 @@ void testMovingAppearanceIsNotPublished(const cv::Mat& frame, const std::shared_
         assert(value.geometry.matrix.empty() && !value.absolute_attempted && value.appearance_suspended);
     }
     const auto expired = session.update(changed, {ref}, 20.1);
-    assert(expired.anchor_expired && expired.absolute_attempted && expired.geometry.matrix.empty());
+    assert(expired.anchor_expired && !expired.absolute_attempted && expired.geometry.matrix.empty());
+    assert(expired.acquisition_still_frames == 0);
 }
 
 void testStationaryUiOverMovingMap(const cv::Mat& frame, const std::shared_ptr<LayerReference>& ref) {
@@ -551,7 +594,7 @@ void testStationaryUiOverMovingMap(const cv::Mat& frame, const std::shared_ptr<L
     cv::Mat anchor = frame.clone();
     draw_ui(anchor);
     BigMapSession session;
-    session.update(anchor, {ref}, 1);
+    acquireSettled(session, anchor, {ref}, 1);
     session.update(anchor, {ref}, 1.1);
     assert(session.update(anchor, {ref}, 1.2).geometry.mode == "found");
     for (const cv::Mat& motion : std::vector<cv::Mat>{
@@ -587,7 +630,7 @@ int main() {
     // Static UI regions do not pan with the map texture.
     frame(cv::Rect(990, 260, 110, 200)).setTo(0);
     BigMapSession session;
-    auto candidate = session.update(frame, {ref}, 1);
+    auto candidate = acquireSettled(session, frame, {ref}, 1);
     assert(candidate.phase == "confirming" && candidate.geometry.matrix.empty() && candidate.absolute_attempted);
     assert(std::string(candidate.follow.outcome) == "not_attempted" && !candidate.anchor_expired && !candidate.absolute_throttled);
     auto first = session.update(frame, {ref}, 1.5);
@@ -599,7 +642,7 @@ int main() {
     assert(std::abs(stable.geometry.matrix.at<double>(0, 0) - 0.45) < 0.01);
     assertFollowAccepted(stable.follow, size);
     BigMapSession slow;
-    assert(slow.update(frame, {ref}, 1).phase == "confirming");
+    assert(acquireSettled(slow, frame, {ref}, 1).phase == "confirming");
     assert(slow.update(frame, {ref}, 4).geometry.matrix.empty());
     assert(slow.update(frame, {ref}, 4.5).phase == "tracking");
     // Blanking left-top UI must not make a fake movement in the geometric matching.
@@ -636,25 +679,27 @@ int main() {
     assert(std::string(changedResult.reset_reason) == "follow_failed");
     assert(std::string(changedResult.follow.outcome) == "tile_change");
     session.reset();
-    assert(session.update(frame, {ref}, 5).phase == "confirming");
+    assert(acquireSettled(session, frame, {ref}, 5).phase == "confirming");
     assert(session.update(frame, {ref}, 5).geometry.matrix.empty()); // duplicate timestamp resets
-    assert(session.update(frame, {ref}, 6).phase == "confirming");
+    assert(acquireSettled(session, frame, {ref}, 6).phase == "confirming");
     auto textureless = session.update(cv::Mat(size, CV_8UC1, cv::Scalar(0)), {ref}, 6.5);
     assert(textureless.geometry.matrix.empty());
     assertFollowInsufficientDescriptors(textureless.follow, size);
     assert(std::string(textureless.reset_reason) == "follow_failed" && textureless.absolute_throttled);
     // Expired absolute anchor cannot silently acquire a fresh timestamp forever.
     session.reset();
-    assert(session.update(frame, {ref}, 10).phase == "confirming");
+    assert(acquireSettled(session, frame, {ref}, 10).phase == "confirming");
     for (double t = 10.5; t <= 20; t += 0.5) {
         auto value = session.update(frame, {ref}, t);
         assert(!value.absolute_attempted);
     }
     auto refresh = session.update(frame, {ref}, 21);
-    assert(refresh.absolute_attempted && refresh.geometry.matrix.empty());
+    assert(!refresh.absolute_attempted && refresh.geometry.matrix.empty());
     assert(refresh.anchor_expired && std::string(refresh.reset_reason) == "none");
     assertFollowNotAttempted(refresh.follow);
-    assert(session.update(frame, {ref}, 21.5).geometry.matrix.empty());
+    assert(!session.update(frame, {ref}, 21.25).absolute_attempted);
+    assert(session.update(frame, {ref}, 21.5).absolute_attempted);
+    assert(session.update(frame, {ref}, 21.75).geometry.matrix.empty());
     assert(session.update(frame, {ref}, 22).geometry.mode == "found");
     // Controls changed even though map texture stayed identical.
     cv::Mat controls = frame.clone();
@@ -668,10 +713,10 @@ int main() {
     cv::Mat resized;
     cv::resize(frame, resized, cv::Size(2340, 1080));
     auto resizedCandidate = session.update(resized, {ref}, 23);
-    assert(resizedCandidate.absolute_attempted && resizedCandidate.geometry.matrix.empty());
+    assert(!resizedCandidate.absolute_attempted && resizedCandidate.geometry.matrix.empty());
     assert(std::string(resizedCandidate.reset_reason) == "frame_size");
     auto longGap = session.update(resized, {ref}, 40);
-    assert(longGap.absolute_attempted && longGap.geometry.matrix.empty());
+    assert(!longGap.absolute_attempted && longGap.geometry.matrix.empty());
     assert(std::string(longGap.reset_reason) == "observation_gap");
     // Same-space appearance switch and an unrelated image both fail closed.
     cv::Mat unrelated(frame.size(), CV_8UC1);
@@ -682,15 +727,15 @@ int main() {
     assert(negativeTs.phase == "rejected" && std::string(negativeTs.reset_reason) == "invalid_input_or_timestamp");
     BigMapSession ambiguous;
     auto other = std::make_shared<LayerReference>("other", "other-space", "surface", reference, mask, mask, 2, 1000, -400);
-    auto uncertain = ambiguous.update(frame, {ref, other}, 1);
+    auto uncertain = acquireSettled(ambiguous, frame, {ref, other}, 1);
     assert(uncertain.phase == "ambiguous" && uncertain.geometry.mode == "ambiguous" && uncertain.geometry.matrix.empty());
     // Recoverable bad input invalidates stationarity/anchor, not just this one result.
     BigMapSession recovery;
-    assert(recovery.update(frame, {ref}, 1).phase == "confirming");
+    assert(acquireSettled(recovery, frame, {ref}, 1).phase == "confirming");
     recovery.update(frame, {ref}, 1.5);
     assert(recovery.update(frame, {ref}, 2).geometry.mode == "found");
     assert(recovery.update(cv::Mat(size, CV_8UC4), {ref}, 2.5).geometry.matrix.empty());
-    assert(recovery.update(frame, {ref}, 3).phase == "confirming");
+    assert(acquireSettled(recovery, frame, {ref}, 3.1).phase == "confirming");
     assert(recovery.update(frame, {ref}, 3.5).geometry.matrix.empty());
     assert(recovery.update(frame, {ref}, 4).geometry.mode == "found");
 
