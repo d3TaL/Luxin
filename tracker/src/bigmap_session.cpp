@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <set>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/imgproc.hpp>
@@ -120,13 +121,14 @@ bool follow(const cv::Mat& anchor, const std::vector<cv::KeyPoint>& anchor_point
     const double hull_area = cv::contourArea(hull);
     stats.hull_fraction = hull_area / current.total();
     if (hull_area < current.total() * 0.015) return reject("hull_support");
+    stats.geometry_accepted = true;
 
     // Dense appearance check prevents reusing geometry just because a handful of icons or
     // unchanged background features survive a floor/space switch. Masks must overlap.
     cv::Mat warped, valid;
     cv::warpAffine(anchor, warped, transform, current.size(), cv::INTER_LINEAR);
-    cv::warpAffine(bigMapGeometryMask(anchor.size()), valid, transform, current.size(), cv::INTER_NEAREST);
-    cv::bitwise_and(valid, bigMapGeometryMask(current.size()), valid);
+    valid = bigMapFollowComparisonMask(current.size(), transform);
+    if (valid.empty()) return reject("invalid_comparison_mask");
     stats.overlap_pixels = cv::countNonZero(valid);
     stats.overlap_fraction = double(stats.overlap_pixels) / current.total();
     if (stats.overlap_pixels < current.total() * 0.20) return reject("overlap");
@@ -161,6 +163,28 @@ bool follow(const cv::Mat& anchor, const std::vector<cv::KeyPoint>& anchor_point
 }
 } // namespace
 
+cv::Mat bigMapFollowComparisonMask(cv::Size size, const cv::Mat& anchor_to_current) {
+    if (size.width <= 0 || size.height <= 0 || anchor_to_current.size() != cv::Size(3, 2) ||
+        anchor_to_current.type() != CV_64FC1 || !cv::checkRange(anchor_to_current)) return {};
+    const double det = anchor_to_current.at<double>(0, 0) * anchor_to_current.at<double>(1, 1) -
+        anchor_to_current.at<double>(0, 1) * anchor_to_current.at<double>(1, 0);
+    if (!std::isfinite(det) || det <= 1e-16) return {};
+    cv::Mat map_mask = bigMapGeometryMask(size);
+    // Keep downsampled UI edges out of the map comparison, at both endpoints.
+    // The additional one-pixel guard is fixed, not derived from residuals/motion.
+    cv::erode(map_mask, map_mask, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3)),
+        cv::Point(-1, -1), 1, cv::BORDER_CONSTANT, cv::Scalar(0));
+    cv::Mat support, warped_support;
+    map_mask.convertTo(support, CV_32F, 1.0 / 255.0);
+    // Same mapping, interpolation and zero border as the warped grayscale image.
+    // Nearest-neighbour validity would admit mixed UI/map samples on subpixel motion.
+    cv::warpAffine(support, warped_support, anchor_to_current, size, cv::INTER_LINEAR,
+        cv::BORDER_CONSTANT, cv::Scalar(0));
+    cv::Mat valid = warped_support >= 1.0f;
+    cv::bitwise_and(valid, map_mask, valid);
+    return valid;
+}
+
 void BigMapSession::reset() {
     anchor_gray_.release();
     anchor_descriptors_.release();
@@ -171,6 +195,8 @@ void BigMapSession::reset() {
     last_attempt_ = -1;
     frame_size_ = {};
     stable_frames_ = 0;
+    appearance_suspended_ = false;
+    suspended_still_frames_ = 0;
 }
 
 BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
@@ -203,12 +229,38 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
         cv::Mat transform;
         const bool ok = follow(anchor_gray_, anchor_keypoints_, anchor_descriptors_, current, transform, result.follow);
         result.follow_ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+        const bool movement_measured = result.follow.geometry_accepted && !previous_transform_.empty();
+        const double movement = movement_measured ?
+            cornerDistance(transform, previous_transform_, current.size()) : 100.0;
+        if (movement_measured) result.movement_px = movement;
+        // Good sparse geometry is evidence of motion, not of unchanged floor/space.
+        // A rejected appearance can retain only an internal candidate while moving.
+        // Never publish it, chain transforms, extend the anchor lifetime or skip sparse gates.
+        const bool appearance_failure = std::strcmp(result.follow.outcome, "dense_change") == 0 ||
+            std::strcmp(result.follow.outcome, "tile_change") == 0 ||
+            std::strcmp(result.follow.outcome, "controls_change") == 0;
+        if (!ok && movement_measured && appearance_failure &&
+            (movement > 0.6 || appearance_suspended_)) {
+            previous_transform_ = transform.clone();
+            stable_frames_ = 0;
+            appearance_suspended_ = true;
+            suspended_still_frames_ = movement <= 0.6 ? suspended_still_frames_ + 1 : 0;
+            result.appearance_suspended = true;
+            result.suspended_still_frames = suspended_still_frames_;
+            if (suspended_still_frames_ < 2) {
+                result.phase = movement > 0.6 ? "moving" : "confirming";
+                return result;
+            }
+            // Still different after two stationary observations: discard and reacquire.
+        }
         if (ok) {
-            const double movement = previous_transform_.empty() ? 100.0 : cornerDistance(transform, previous_transform_, current.size());
             previous_transform_ = transform.clone();
             stable_frames_ = movement <= 0.6 ? stable_frames_ + 1 : 0;
             result.movement_px = movement;
             result.stable_frames = stable_frames_;
+            suspended_still_frames_ = 0;
+            if (stable_frames_ >= 2) appearance_suspended_ = false;
+            result.appearance_suspended = appearance_suspended_;
             result.phase = stable_frames_ >= 2 ? "tracking" : movement <= 0.6 ? "confirming" : "moving";
             if (stable_frames_ >= 2) {
                 // small-current <- small-anchor <- original-anchor <- Kongying.
@@ -234,10 +286,14 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
             }
             return result;
         }
-        // No stale fallback: failed follow destroys the anchor before reacquisition.
+        // No stale fallback: untrusted sparse geometry or persistent/stationary
+        // appearance rejection destroys the anchor before reacquisition.
         anchor_gray_.release();
         previous_transform_.release();
         stable_frames_ = 0;
+        appearance_suspended_ = false;
+        suspended_still_frames_ = 0;
+        result.appearance_suspended = false;
         result.reset_reason = "follow_failed";
     }
     // Expiry has always skipped follow without resetting the session here.
@@ -261,6 +317,8 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
     features(current, anchor_keypoints_, anchor_descriptors_);
     previous_transform_ = (cv::Mat_<double>(2, 3) << 1, 0, 0, 0, 1, 0);
     stable_frames_ = 0;
+    appearance_suspended_ = false;
+    suspended_still_frames_ = 0;
     result.phase = "confirming";
     // The absolute result remains an internal candidate even when computation was fast.
     return result;

@@ -44,7 +44,13 @@ struct BigMapFollowStats {
     int worst_tile_changed_pixels = -1;
     double worst_tile_changed_fraction = -1.0;
     std::array<BigMapControlStats, 2> controls{};
+    bool geometry_accepted = false; // all sparse gates passed; NOT permission to publish
 };
+
+// Current follow-image coordinates; transform maps small-anchor -> small-current.
+// Only fully supported INTER_LINEAR samples of map-only pixels are valid. This is
+// independent of image differences: it must never hide a newly changed map region.
+cv::Mat bigMapFollowComparisonMask(cv::Size size, const cv::Mat& anchor_to_current);
 
 struct BigMapSessionResult {
     BigMapGeometry geometry; // mode=found only after a fresh stationary confirmation
@@ -61,6 +67,8 @@ struct BigMapSessionResult {
     double movement_px = -1.0;
     int stable_frames = 0;
     bool absolute_throttled = false;
+    bool appearance_suspended = false; // internal candidate retained, no geometry output
+    int suspended_still_frames = 0;
 };
 
 // Synchronous, diagnostic-only observer immediately BEFORE registerBigMap can block.
@@ -87,6 +95,8 @@ private:
     double last_attempt_ = -1.0;
     cv::Size frame_size_;
     int stable_frames_ = 0;
+    bool appearance_suspended_ = false;
+    int suspended_still_frames_ = 0;
 };
 
 } // namespace luxin

@@ -116,12 +116,13 @@ void logBigMapDiagnostics(const luxin::BigMapSessionResult& result,
     const auto& f = result.follow;
     LOGI("BigMap stage=%s ts=%.9f frame=%dx%d phase=%s mode=%s absolute=%d throttled=%d "
         "reset=%s anchorExpired=%d anchorAgeS=%.3f gapS=%.3f sinceAttemptS=%.3f "
-        "follow=%s followMs=%.1f movementPx=%.3f stable=%d convertMs=%.1f "
+        "follow=%s sparseOk=%d suspended=%d suspendedStill=%d followMs=%.1f movementPx=%.3f stable=%d convertMs=%.1f "
         "features=%.1f match=%.1f validate=%.1f ms keypoints=%d sessionMs=%.1f",
         stage, context.timestamp, context.width, context.height, result.phase.c_str(),
         result.geometry.mode.c_str(), result.absolute_attempted, result.absolute_throttled,
         result.reset_reason, result.anchor_expired, result.anchor_age_seconds,
         result.observation_gap_seconds, result.since_attempt_seconds, f.outcome,
+        f.geometry_accepted, result.appearance_suspended, result.suspended_still_frames,
         result.follow_ms, result.movement_px, result.stable_frames, context.conversion_ms,
         result.registration.features_ms, result.registration.matching_ms,
         result.registration.validation_ms, result.registration.query_features, session_ms);

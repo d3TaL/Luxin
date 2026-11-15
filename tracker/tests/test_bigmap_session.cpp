@@ -40,6 +40,7 @@ void assertTileStatsUnvisited(const BigMapFollowStats& follow) {
 }
 
 void assertFollowNotAttempted(const BigMapFollowStats& follow) {
+    assert(!follow.geometry_accepted);
     assert(std::string(follow.outcome) == "not_attempted");
     assert(follow.working_size == cv::Size());
     assert(follow.anchor_keypoints == -1);
@@ -64,6 +65,7 @@ void assertFollowNotAttempted(const BigMapFollowStats& follow) {
 }
 
 void assertFollowInsufficientDescriptors(const BigMapFollowStats& follow, cv::Size working_size) {
+    assert(!follow.geometry_accepted);
     assert(std::string(follow.outcome) == "insufficient_descriptors");
     assert(follow.working_size == working_size);
     assert(follow.anchor_keypoints >= 2 && follow.anchor_descriptors == follow.anchor_keypoints);
@@ -87,6 +89,7 @@ void assertFollowInsufficientDescriptors(const BigMapFollowStats& follow, cv::Si
 }
 
 void assertFollowAccepted(const BigMapFollowStats& follow, cv::Size working_size) {
+    assert(follow.geometry_accepted);
     assert(std::string(follow.outcome) == "accepted");
     assert(follow.working_size == working_size);
     assert(follow.anchor_keypoints >= 2 && follow.anchor_descriptors == follow.anchor_keypoints);
@@ -180,6 +183,9 @@ void assertResultsEquivalent(const BigMapSessionResult& a, const BigMapSessionRe
     assert(a.movement_px == b.movement_px);
     assert(a.stable_frames == b.stable_frames);
     assert(a.absolute_throttled == b.absolute_throttled);
+    assert(a.follow.geometry_accepted == b.follow.geometry_accepted);
+    assert(a.appearance_suspended == b.appearance_suspended);
+    assert(a.suspended_still_frames == b.suspended_still_frames);
 }
 
 void assertPreSiftSinkShape(const BigMapSessionResult& observed) {
@@ -368,8 +374,10 @@ void testObserverEquivalenceAndSessionResets(
         {&shifted, 2.5},     // follow accepted (moving)
         {&shifted, 3.0},     // follow accepted (confirming)
         {&shifted, 3.5},     // follow accepted (tracking)
-        {&ctrl0_edit, 4.0},  // sink 1: follow_failed (controls_change) + reacquire
-        {&frame, 4.5},       // follow_failed (controls_change) throttled, no sink
+        {&ctrl0_edit, 4.0},  // appearance failure + measured movement: suspended, no geometry
+        {&ctrl0_edit, 4.2},  // first stationary appearance failure
+        {&ctrl0_edit, 4.4},  // sink 1: second still failure => discard + reacquire
+        {&frame, 4.5},       // controls_change while stationary, throttled, no sink
         {&frame, 6.5},       // sink 2: reacquire after cooldown
         {&frame, 15.0},      // follow accepted within 10s
         {&frame, 17.0},      // sink 3: anchor_expired (>10s), reset_reason=none
@@ -415,13 +423,151 @@ void testObserverEquivalenceAndSessionResets(
     assert(!sink.observations[5].anchor_expired);
     assert(std::string(sink.observations[5].reset_reason) == "frame_size");
 
-    assert(observed[7].absolute_throttled && !observed[7].absolute_attempted);
-    assert(std::string(observed[7].reset_reason) == "follow_failed");
-    assert(observed[10].anchor_expired && std::string(observed[10].reset_reason) == "none");
-    assert(std::string(observed[11].reset_reason) == "observation_gap");
-    assert(std::string(observed[12].reset_reason) == "frame_size");
-    assert(observed[13].phase == "rejected" && std::string(observed[13].reset_reason) == "invalid_input_or_timestamp");
-    assert(!observed[13].absolute_attempted);
+    assert(observed[6].appearance_suspended && observed[6].phase == "moving");
+    assert(!observed[6].absolute_attempted && observed[6].geometry.matrix.empty());
+    assert(observed[7].suspended_still_frames == 1 && observed[7].geometry.matrix.empty());
+    assert(observed[9].absolute_throttled && !observed[9].absolute_attempted);
+    assert(std::string(observed[9].reset_reason) == "follow_failed");
+    assert(observed[12].anchor_expired && std::string(observed[12].reset_reason) == "none");
+    assert(std::string(observed[13].reset_reason) == "observation_gap");
+    assert(std::string(observed[14].reset_reason) == "frame_size");
+    assert(observed[15].phase == "rejected" && std::string(observed[15].reset_reason) == "invalid_input_or_timestamp");
+    assert(!observed[15].absolute_attempted);
+}
+
+void testMovingAppearanceIsNotPublished(const cv::Mat& frame, const std::shared_ptr<LayerReference>& ref) {
+    cv::setRNGSeed(303);
+    // Compose a map first, then fixed UI. Never warp UI along with the map.
+    const auto draw_ui = [](cv::Mat& image) {
+        image(cv::Rect(70, 255, 60, 210)).setTo(240); // existing slider exclusion
+        image(cv::Rect(1395, 250, 85, 225)).setTo(40);
+        image(cv::Rect(1010, 270, 60, 175)).setTo(40);
+    };
+    cv::Mat anchor = frame.clone();
+    draw_ui(anchor);
+    BigMapSession session;
+    assert(session.update(anchor, {ref}, 1).phase == "confirming");
+    assert(!session.update(anchor, {ref}, 1.1).absolute_attempted);
+    assert(session.update(anchor, {ref}, 1.2).geometry.mode == "found");
+
+    cv::Mat motion = (cv::Mat_<double>(2, 3) << 1, 0, 8, 0, 1, 0);
+    cv::Mat shifted;
+    cv::warpAffine(frame, shifted, motion, frame.size());
+    draw_ui(shifted);
+    cv::Mat changed = shifted.clone();
+    changed(cv::Rect(630, 360, 90, 90)).setTo(250); // not masked just because it changed
+    const auto moving = session.update(changed, {ref}, 1.3);
+    assert(moving.follow.geometry_accepted && std::string(moving.follow.outcome) == "tile_change");
+    assert(moving.phase == "moving" && moving.appearance_suspended);
+    assert(moving.geometry.matrix.empty() && !moving.absolute_attempted);
+    assert(moving.stable_frames == 0 && moving.suspended_still_frames == 0);
+
+    // Moving evidence alone must never authorize geometry, even on a floor-like switch.
+    const auto still_bad = session.update(changed, {ref}, 1.4);
+    assert(still_bad.geometry.matrix.empty() && !still_bad.absolute_attempted);
+    assert(still_bad.phase == "confirming" && still_bad.suspended_still_frames == 1);
+    const auto rejected = session.update(changed, {ref}, 1.5);
+    assert(rejected.geometry.matrix.empty() && rejected.absolute_throttled);
+    assert(std::string(rejected.reset_reason) == "follow_failed" && !rejected.appearance_suspended);
+    assert(!session.update(shifted, {ref}, 1.6).follow.geometry_accepted); // destroyed, not stale fallback
+
+    // A transient map occlusion can clear. Two clean stationary checks are still required.
+    session.reset();
+    assert(session.update(anchor, {ref}, 3).phase == "confirming");
+    session.update(anchor, {ref}, 3.1);
+    assert(session.update(anchor, {ref}, 3.2).geometry.mode == "found");
+    assert(session.update(changed, {ref}, 3.3).appearance_suspended);
+    const auto clean1 = session.update(shifted, {ref}, 3.4);
+    assert(clean1.follow.geometry_accepted && std::string(clean1.follow.outcome) == "accepted");
+    assert(clean1.geometry.matrix.empty() && !clean1.absolute_attempted);
+    // An interleaved bad frame cancels a partial clean confirmation.
+    const auto interleaved = session.update(changed, {ref}, 3.45);
+    assert(interleaved.geometry.matrix.empty() && interleaved.suspended_still_frames == 1);
+    assert(session.update(shifted, {ref}, 3.5).geometry.matrix.empty());
+    const auto clean2 = session.update(shifted, {ref}, 3.6);
+    assert(clean2.geometry.mode == "found" && clean2.phase == "tracking");
+    assert(!clean2.absolute_attempted && !clean2.appearance_suspended);
+    assert(clean2.geometry.timestamp_seconds == 3.6);
+
+    // Sparse failure while suspended is immediate rejection, never a moving fallback.
+    session.reset();
+    session.update(anchor, {ref}, 5);
+    session.update(anchor, {ref}, 5.1);
+    session.update(anchor, {ref}, 5.2);
+    assert(session.update(changed, {ref}, 5.3).appearance_suspended);
+    const auto blank = session.update(cv::Mat(frame.size(), CV_8UC1, cv::Scalar(0)), {ref}, 5.4);
+    assert(!blank.follow.geometry_accepted && !blank.appearance_suspended);
+    assert(blank.geometry.matrix.empty() && std::string(blank.reset_reason) == "follow_failed");
+
+    // Pause/reset destroys a suspended candidate before a later observation can complete it.
+    session.reset();
+    session.update(anchor, {ref}, 7);
+    assert(session.update(changed, {ref}, 7.1).appearance_suspended);
+    session.reset();
+    const auto restarted = session.update(shifted, {ref}, 7.2);
+    assert(restarted.absolute_attempted && restarted.geometry.matrix.empty());
+    assert(std::string(restarted.follow.outcome) == "not_attempted" && !restarted.appearance_suspended);
+
+    // A changed control during a real pan cannot be hidden by the suspension.
+    session.reset();
+    session.update(anchor, {ref}, 8);
+    session.update(anchor, {ref}, 8.1);
+    session.update(anchor, {ref}, 8.2);
+    cv::Mat control_changed = shifted.clone();
+    control_changed(cv::Rect(1010, 270, 60, 175)).setTo(255);
+    const auto control_moving = session.update(control_changed, {ref}, 8.3);
+    assert(std::string(control_moving.follow.outcome) == "controls_change");
+    assert(control_moving.appearance_suspended && control_moving.geometry.matrix.empty());
+    const auto control_still = session.update(control_changed, {ref}, 8.4);
+    assert(control_still.suspended_still_frames == 1 && control_still.geometry.matrix.empty());
+    const auto control_reject = session.update(control_changed, {ref}, 8.5);
+    assert(std::string(control_reject.reset_reason) == "follow_failed");
+    assert(control_reject.geometry.matrix.empty() && !control_reject.appearance_suspended);
+
+    // Suspension cannot refresh the 10-second absolute-anchor lifetime during continued motion.
+    session.reset();
+    session.update(anchor, {ref}, 10);
+    session.update(anchor, {ref}, 10.1);
+    session.update(anchor, {ref}, 10.2);
+    for (int i = 1; i <= 5; ++i) {
+        motion.at<double>(0, 2) = i * 8;
+        cv::warpAffine(frame, changed, motion, frame.size());
+        draw_ui(changed);
+        changed(cv::Rect(630, 360, 90, 90)).setTo(250);
+        const auto value = session.update(changed, {ref}, 10.2 + i * 1.5);
+        assert(value.geometry.matrix.empty() && !value.absolute_attempted && value.appearance_suspended);
+    }
+    const auto expired = session.update(changed, {ref}, 20.1);
+    assert(expired.anchor_expired && expired.absolute_attempted && expired.geometry.matrix.empty());
+}
+
+void testStationaryUiOverMovingMap(const cv::Mat& frame, const std::shared_ptr<LayerReference>& ref) {
+    cv::setRNGSeed(404);
+    const auto draw_ui = [](cv::Mat& image) {
+        image(cv::Rect(70, 255, 60, 210)).setTo(255);
+        image(cv::Rect(1395, 250, 85, 225)).setTo(30);
+        image(cv::Rect(1010, 270, 60, 175)).setTo(30);
+    };
+    cv::Mat anchor = frame.clone();
+    draw_ui(anchor);
+    BigMapSession session;
+    session.update(anchor, {ref}, 1);
+    session.update(anchor, {ref}, 1.1);
+    assert(session.update(anchor, {ref}, 1.2).geometry.mode == "found");
+    for (const cv::Mat& motion : std::vector<cv::Mat>{
+             (cv::Mat_<double>(2, 3) << 1, 0, 1.25, 0, 1, 0.5),
+             (cv::Mat_<double>(2, 3) << 1.03, 0, -15, 0, 1.03, -5)}) {
+        cv::Mat shifted;
+        cv::warpAffine(frame, shifted, motion, frame.size());
+        draw_ui(shifted);
+        const double t = motion.at<double>(0, 0) == 1 ? 1.3 : 1.6;
+        const auto moving = session.update(shifted, {ref}, t);
+        assert(moving.phase == "moving" && moving.geometry.matrix.empty() && !moving.absolute_attempted);
+        assertFollowAccepted(moving.follow, frame.size());
+        assert(session.update(shifted, {ref}, t + 0.1).geometry.matrix.empty());
+        const auto settled = session.update(shifted, {ref}, t + 0.2);
+        assert(settled.phase == "tracking" && settled.geometry.mode == "found" && !settled.absolute_attempted);
+    }
 }
 
 } // namespace
@@ -460,6 +606,7 @@ int main() {
     cv::Mat uiOnlyChange = frame.clone();
     uiOnlyChange(cv::Rect(0, 0, 380, 200)).setTo(255);
     assert(slow.update(uiOnlyChange, {ref}, 5).geometry.mode == "found");
+    // Legacy geometry-only fixture (whole-frame warp). Independent fixed UI is tested below.
     // Translation: no matrix while moving, then recover against the SAME absolute anchor.
     cv::Mat shifted;
     cv::Mat shift = (cv::Mat_<double>(2, 3) << 1, 0, 12, 0, 1, 0);
@@ -550,6 +697,8 @@ int main() {
     testFollowDiagnosticsAndObserver(frame, ref);
     testControlRoiFailures(frame, ref);
     testObserverEquivalenceAndSessionResets(frame, shifted, ref);
+    testMovingAppearanceIsNotPublished(frame, ref);
+    testStationaryUiOverMovingMap(frame, ref);
 
     std::cout << "big-map session tests passed\n";
 }
