@@ -21,7 +21,8 @@ data class BigMapGeometry(
     val inliers: Int,
     val matches: Int,
     val errorPx: Double,
-    val support: Double
+    val support: Double,
+    val version: Int = 1
 ) {
     init {
         require(space.isNotBlank()) { "space must not be blank" }
@@ -36,6 +37,7 @@ data class BigMapGeometry(
         require(matches >= inliers) { "matches must be >= inliers: matches=$matches, inliers=$inliers" }
         require(errorPx.isFinite() && errorPx >= 0.0) { "errorPx must be finite and >= 0: $errorPx" }
         require(support.isFinite() && support in 0.0..1.0) { "support must be in 0..1: $support" }
+        require(version >= 1) { "version must be >= 1: $version" }
 
         val det = matrix[0] * matrix[4] - matrix[1] * matrix[3]
         require(det.isFinite() && det > 0.0) { "matrix determinant must be positive: $det" }
@@ -87,7 +89,8 @@ data class BigMapGeometry(
 data class DecodedBigMapGeometry(
     val mode: String,
     val geometry: BigMapGeometry?,
-    val phase: String = "absolute"
+    val phase: String = "absolute",
+    val version: Int = 1
 )
 
 @Serializable
@@ -104,7 +107,8 @@ private data class NativeBigMapPayload(
     val inliers: Int? = null,
     val matches: Int? = null,
     val errorPx: Double? = null,
-    val support: Double? = null
+    val support: Double? = null,
+    val version: Int? = null
 )
 
 object BigMapGeometryDecoder {
@@ -114,31 +118,37 @@ object BigMapGeometryDecoder {
         val payload = try {
             json.decodeFromString(NativeBigMapPayload.serializer(), raw)
         } catch (_: Exception) {
-            return DecodedBigMapGeometry("rejected", null, "rejected")
+            return DecodedBigMapGeometry("rejected", null, "rejected", version = 1)
         }
 
         if (payload.error != null) {
-            return DecodedBigMapGeometry("rejected", null, "rejected")
+            return DecodedBigMapGeometry("rejected", null, "rejected", version = payload.version ?: 1)
+        }
+
+        // V2 envelope: explicit version dispatch. Unknown version → hidden without geometry.
+        val version = payload.version ?: 1
+        if (version != 1) {
+            return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
         }
 
         if (payload.mode != "found") {
-            return DecodedBigMapGeometry(payload.mode, null, payload.phase)
+            return DecodedBigMapGeometry(payload.mode, null, payload.phase, version = version)
         }
 
         if (payload.phase != "tracking" && payload.phase != "absolute") {
-            return DecodedBigMapGeometry(payload.mode, null, payload.phase)
+            return DecodedBigMapGeometry(payload.mode, null, payload.phase, version = version)
         }
 
-        val space = payload.space?.takeIf { it.isNotBlank() } ?: return DecodedBigMapGeometry("rejected", null, "rejected")
-        val reference = payload.reference?.takeIf { it.isNotBlank() } ?: return DecodedBigMapGeometry("rejected", null, "rejected")
-        val frameWidth = payload.frameWidth?.takeIf { it > 0 } ?: return DecodedBigMapGeometry("rejected", null, "rejected")
-        val frameHeight = payload.frameHeight?.takeIf { it > 0 } ?: return DecodedBigMapGeometry("rejected", null, "rejected")
-        val timestampSeconds = payload.timestampSeconds?.takeIf { it.isFinite() && it >= 0.0 } ?: return DecodedBigMapGeometry("rejected", null, "rejected")
-        val inliers = payload.inliers?.takeIf { it >= 12 } ?: return DecodedBigMapGeometry("rejected", null, "rejected")
-        val matches = payload.matches?.takeIf { it >= inliers } ?: return DecodedBigMapGeometry("rejected", null, "rejected")
-        val errorPx = payload.errorPx?.takeIf { it.isFinite() && it >= 0.0 } ?: return DecodedBigMapGeometry("rejected", null, "rejected")
-        val support = payload.support?.takeIf { it.isFinite() && it in 0.0..1.0 } ?: return DecodedBigMapGeometry("rejected", null, "rejected")
-        val matrix = payload.matrix?.takeIf { it.size == 6 && it.all { v -> v.isFinite() } } ?: return DecodedBigMapGeometry("rejected", null, "rejected")
+        val space = payload.space?.takeIf { it.isNotBlank() } ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
+        val reference = payload.reference?.takeIf { it.isNotBlank() } ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
+        val frameWidth = payload.frameWidth?.takeIf { it > 0 } ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
+        val frameHeight = payload.frameHeight?.takeIf { it > 0 } ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
+        val timestampSeconds = payload.timestampSeconds?.takeIf { it.isFinite() && it >= 0.0 } ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
+        val inliers = payload.inliers?.takeIf { it >= 12 } ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
+        val matches = payload.matches?.takeIf { it >= inliers } ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
+        val errorPx = payload.errorPx?.takeIf { it.isFinite() && it >= 0.0 } ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
+        val support = payload.support?.takeIf { it.isFinite() && it in 0.0..1.0 } ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
+        val matrix = payload.matrix?.takeIf { it.size == 6 && it.all { v -> v.isFinite() } } ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
 
         val geometry = try {
             BigMapGeometry(
@@ -151,12 +161,21 @@ object BigMapGeometryDecoder {
                 inliers = inliers,
                 matches = matches,
                 errorPx = errorPx,
-                support = support
+                support = support,
+                version = version
             )
         } catch (_: IllegalArgumentException) {
-            return DecodedBigMapGeometry("rejected", null, "rejected")
+            return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
         }
 
-        return DecodedBigMapGeometry("found", geometry, payload.phase)
+        return DecodedBigMapGeometry("found", geometry, payload.phase, version = version)
+    }
+
+    /** Negative compatibility: old decoder must reject v2 payload with unknown version. */
+    fun decodeStrictV1(raw: String): DecodedBigMapGeometry {
+        val result = decode(raw)
+        return if (result.version != 1) {
+            DecodedBigMapGeometry("rejected", null, "rejected", version = result.version)
+        } else result
     }
 }
