@@ -1,5 +1,6 @@
 package io.github.d3tal.luxin.tracker
 
+import android.graphics.Bitmap
 import android.graphics.Color
 
 /**
@@ -19,6 +20,19 @@ data class LayerDecision(
     val isSurface: Boolean,
     val mode: String, // "surface" | "layer" | "unknown"
     val reason: String?
+)
+
+private const val LAYER_COLUMN_X_FRACTION_MIN = 0.88
+private const val LAYER_COLUMN_X_FRACTION_MAX = 0.96
+private const val BRIGHTNESS_THRESHOLD = 180
+
+private data class ButtonRect(val x: Int, val y: Int, val brightness: Int)
+
+private data class ButtonCluster(
+    val minX: Int, val maxX: Int,
+    val minY: Int, val maxY: Int,
+    val avgBrightness: Double,
+    val centerY: Int
 )
 
 /**
@@ -101,3 +115,30 @@ fun detectLayer(
  */
 fun detectLayer(bitmap: android.graphics.Bitmap): LayerDecision =
     detectLayer(bitmap.width, bitmap.height) { x, y -> bitmap.getPixel(x, y) }
+
+private fun clusterVertically(candidates: List<ButtonRect>, maxGap: Int): List<ButtonCluster> {
+    val sorted = candidates.sortedBy { it.y }
+    val clusters = mutableListOf<MutableList<ButtonRect>>()
+    var current = mutableListOf<ButtonRect>()
+
+    for (c in sorted) {
+        if (current.isEmpty() || c.y - current.last().y <= maxGap) {
+            current.add(c)
+        } else {
+            clusters.add(current)
+            current = mutableListOf(c)
+        }
+    }
+    if (current.isNotEmpty()) clusters.add(current)
+
+    return clusters.map { group ->
+        ButtonCluster(
+            minX = group.minOf { it.x },
+            maxX = group.maxOf { it.x },
+            minY = group.minOf { it.y },
+            maxY = group.maxOf { it.y },
+            avgBrightness = if (group.isEmpty()) 0.0 else group.sumOf { it.brightness.toDouble() } / group.size,
+            centerY = (group.minOf { it.y } + group.maxOf { it.y }) / 2
+        )
+    }
+}
