@@ -157,18 +157,18 @@ void logBeforeBigMapAbsolute(const luxin::BigMapSessionResult& result, void* con
 extern "C" {
 
 JNIEXPORT jstring JNICALL
-Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeRegisterBigMap(
+Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeRegisterBigMapV2(
     JNIEnv* env, jobject, jlong handle, jobject bitmap, jdouble timestamp
 ) {
     auto* ctx = reinterpret_cast<NativeTrackerContext*>(handle);
     if (!ctx) {
-        LOGI("BigMap stage=error ts=%.9f reason=closed_tracker", timestamp);
+        LOGI("BigMapV2 stage=error ts=%.9f reason=closed_tracker", timestamp);
         return env->NewStringUTF("{\"error\":\"closed tracker\"}");
     }
     std::lock_guard<std::mutex> lock(ctx->mutex);
     if (!bitmap) {
         ctx->bigmap.reset();
-        LOGI("BigMap stage=error ts=%.9f reset=null_bitmap", timestamp);
+        LOGI("BigMapV2 stage=error ts=%.9f reset=null_bitmap", timestamp);
         return env->NewStringUTF("{\"error\":\"null bitmap\"}");
     }
     try {
@@ -176,7 +176,7 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeRegisterBigMap(
         cv::Mat bgr;
         if (!bitmapToBgrMat(env, bitmap, bgr)) {
             ctx->bigmap.reset();
-            LOGI("BigMap stage=error ts=%.9f reset=bitmap_read_failed", timestamp);
+            LOGI("BigMapV2 stage=error ts=%.9f reset=bitmap_read_failed", timestamp);
             return env->NewStringUTF("{\"error\":\"cannot read bitmap\"}");
         }
         BigMapLogContext diagnostics{timestamp, bgr.cols, bgr.rows, diagnosticMs(conversion_start)};
@@ -188,24 +188,32 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeRegisterBigMap(
         std::ostringstream out;
         out.imbue(std::locale::classic());
         out << std::setprecision(17) << "{\"mode\":" << jsonString(g.mode)
-            << ",\"phase\":" << jsonString(result.phase);
+            << ",\"phase\":" << jsonString(result.phase)
+            << ",\"version\":2";
         if (g.mode == "found") {
-            out << ",\"space\":" << jsonString(g.space) << ",\"reference\":" << jsonString(g.reference)
-                << ",\"frameWidth\":" << g.frame_width << ",\"frameHeight\":" << g.frame_height
-                << ",\"timestampSeconds\":" << g.timestamp_seconds << ",\"inliers\":" << g.inliers
-                << ",\"matches\":" << g.matches << ",\"errorPx\":" << g.error_px
-                << ",\"support\":" << g.support << ",\"matrix\":[";
+            out << ",\"v2\":{"
+                << "\"space\":" << jsonString(g.space)
+                << ",\"reference\":" << jsonString(g.reference)
+                << ",\"frameWidth\":" << g.frame_width
+                << ",\"frameHeight\":" << g.frame_height
+                << ",\"timestampSeconds\":" << g.timestamp_seconds
+                << ",\"inliers\":" << g.inliers
+                << ",\"matches\":" << g.matches
+                << ",\"errorPx\":" << g.error_px
+                << ",\"support\":" << g.support
+                << ",\"matrix\":[";
             for (int i = 0; i < 6; ++i) {
                 if (i) out << ',';
                 out << g.matrix.at<double>(i / 3, i % 3);
             }
             out << ']';
+            out << "}";
         }
         out << '}';
         return env->NewStringUTF(out.str().c_str());
     } catch (const std::exception&) {
         ctx->bigmap.reset();
-        LOGI("BigMap stage=error ts=%.9f reset=registration_exception", timestamp);
+        LOGI("BigMapV2 stage=error ts=%.9f reset=registration_exception", timestamp);
         return env->NewStringUTF("{\"error\":\"big-map registration failed\"}");
     }
 }

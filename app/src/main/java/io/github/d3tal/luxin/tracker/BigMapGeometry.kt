@@ -127,7 +127,7 @@ object BigMapGeometryDecoder {
 
         // V2 envelope: explicit version dispatch. Unknown version → hidden without geometry.
         val version = payload.version ?: 1
-        if (version != 1) {
+        if (version != 1 && version != 2) {
             return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
         }
 
@@ -139,29 +139,54 @@ object BigMapGeometryDecoder {
             return DecodedBigMapGeometry(payload.mode, null, payload.phase, version = version)
         }
 
-        val space = payload.space?.takeIf { it.isNotBlank() } ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
-        val reference = payload.reference?.takeIf { it.isNotBlank() } ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
-        val frameWidth = payload.frameWidth?.takeIf { it > 0 } ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
-        val frameHeight = payload.frameHeight?.takeIf { it > 0 } ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
-        val timestampSeconds = payload.timestampSeconds?.takeIf { it.isFinite() && it >= 0.0 } ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
-        val inliers = payload.inliers?.takeIf { it >= 12 } ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
-        val matches = payload.matches?.takeIf { it >= inliers } ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
-        val errorPx = payload.errorPx?.takeIf { it.isFinite() && it >= 0.0 } ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
-        val support = payload.support?.takeIf { it.isFinite() && it in 0.0..1.0 } ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
-        val matrix = payload.matrix?.takeIf { it.size == 6 && it.all { v -> v.isFinite() } } ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
+        // Extract fields: V1 uses top-level fields, V2 wraps them inside "v2" object.
+        val space = payload.space?.takeIf { it.isNotBlank() }
+        val reference = payload.reference?.takeIf { it.isNotBlank() }
+        val frameWidth = payload.frameWidth
+        val frameHeight = payload.frameHeight
+        val timestampSeconds = payload.timestampSeconds
+        val inliers = payload.inliers
+        val matches = payload.matches
+        val errorPx = payload.errorPx
+        val support = payload.support
+        val matrix = payload.matrix
+
+        // If fields are missing at top level and we have v2, try to parse from v2 object in raw.
+        // This handles the case where nativeRegisterBigMapV2 emits {"v2":{...}}.
+        val spaceV2 = if (space == null && version == 2) extractV2Field(raw, "space") else null
+        val referenceV2 = if (reference == null && version == 2) extractV2Field(raw, "reference") else null
+        val frameWidthV2 = if (frameWidth == null && version == 2) extractV2IntField(raw, "frameWidth") else null
+        val frameHeightV2 = if (frameHeight == null && version == 2) extractV2IntField(raw, "frameHeight") else null
+        val timestampSecondsV2 = if (timestampSeconds == null && version == 2) extractV2DoubleField(raw, "timestampSeconds") else null
+        val inliersV2 = if (inliers == null && version == 2) extractV2IntField(raw, "inliers") else null
+        val matchesV2 = if (matches == null && version == 2) extractV2IntField(raw, "matches") else null
+        val errorPxV2 = if (errorPx == null && version == 2) extractV2DoubleField(raw, "errorPx") else null
+        val supportV2 = if (support == null && version == 2) extractV2DoubleField(raw, "support") else null
+        val matrixV2 = if (matrix == null && version == 2) extractV2MatrixField(raw) else null
+
+        val finalSpace = space ?: spaceV2 ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
+        val finalReference = reference ?: referenceV2 ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
+        val finalFrameWidth = frameWidth ?: frameWidthV2 ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
+        val finalFrameHeight = frameHeight ?: frameHeightV2 ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
+        val finalTimestampSeconds = timestampSeconds ?: timestampSecondsV2 ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
+        val finalInliers = inliers ?: inliersV2 ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
+        val finalMatches = matches ?: matchesV2 ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
+        val finalErrorPx = errorPx ?: errorPxV2 ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
+        val finalSupport = support ?: supportV2 ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
+        val finalMatrix = matrix ?: matrixV2 ?: return DecodedBigMapGeometry("rejected", null, "rejected", version = version)
 
         val geometry = try {
             BigMapGeometry(
-                space = space,
-                reference = reference,
-                matrix = matrix,
-                frameWidth = frameWidth,
-                frameHeight = frameHeight,
-                timestampSeconds = timestampSeconds,
-                inliers = inliers,
-                matches = matches,
-                errorPx = errorPx,
-                support = support,
+                space = finalSpace,
+                reference = finalReference,
+                matrix = finalMatrix,
+                frameWidth = finalFrameWidth,
+                frameHeight = finalFrameHeight,
+                timestampSeconds = finalTimestampSeconds,
+                inliers = finalInliers,
+                matches = finalMatches,
+                errorPx = finalErrorPx,
+                support = finalSupport,
                 version = version
             )
         } catch (_: IllegalArgumentException) {
@@ -177,5 +202,152 @@ object BigMapGeometryDecoder {
         return if (result.version != 1) {
             DecodedBigMapGeometry("rejected", null, "rejected", version = result.version)
         } else result
+    }
+
+    // --- V2 envelope extraction helpers (used when native emits {"v2":{...}}) ---
+
+    private fun extractV2Field(raw: String, field: String): String? {
+        val v2Start = raw.indexOf("\"v2\":{")
+        if (v2Start < 0) return null
+        val v2BodyStart = v2Start + 6
+        val endBrace = findMatchingBrace(raw, v2BodyStart)
+        if (endBrace < 0) return null
+        val v2Body = raw.substring(v2BodyStart, endBrace)
+        val pattern = "\"$field\":"
+        val idx = v2Body.indexOf(pattern)
+        if (idx < 0) return null
+        val valueStart = idx + pattern.length
+        return extractJsonStringValue(v2Body, valueStart)
+    }
+
+    private fun extractV2IntField(raw: String, field: String): Int? {
+        val v2Start = raw.indexOf("\"v2\":{")
+        if (v2Start < 0) return null
+        val v2BodyStart = v2Start + 6
+        val endBrace = findMatchingBrace(raw, v2BodyStart)
+        if (endBrace < 0) return null
+        val v2Body = raw.substring(v2BodyStart, endBrace)
+        val pattern = "\"$field\":"
+        val idx = v2Body.indexOf(pattern)
+        if (idx < 0) return null
+        val valueStart = idx + pattern.length
+        return extractJsonIntValue(v2Body, valueStart)
+    }
+
+    private fun extractV2DoubleField(raw: String, field: String): Double? {
+        val v2Start = raw.indexOf("\"v2\":{")
+        if (v2Start < 0) return null
+        val v2BodyStart = v2Start + 6
+        val endBrace = findMatchingBrace(raw, v2BodyStart)
+        if (endBrace < 0) return null
+        val v2Body = raw.substring(v2BodyStart, endBrace)
+        val pattern = "\"$field\":"
+        val idx = v2Body.indexOf(pattern)
+        if (idx < 0) return null
+        val valueStart = idx + pattern.length
+        return extractJsonDoubleValue(v2Body, valueStart)
+    }
+
+    private fun extractV2MatrixField(raw: String): List<Double>? {
+        val v2Start = raw.indexOf("\"v2\":{")
+        if (v2Start < 0) return null
+        val v2BodyStart = v2Start + 6
+        val endBrace = findMatchingBrace(raw, v2BodyStart)
+        if (endBrace < 0) return null
+        val v2Body = raw.substring(v2BodyStart, endBrace)
+        val pattern = "\"matrix\":"
+        val idx = v2Body.indexOf(pattern)
+        if (idx < 0) return null
+        val arrStart = v2Body.indexOf('[', idx)
+        if (arrStart < 0) return null
+        val arrEnd = findMatchingBracket(v2Body, arrStart)
+        if (arrEnd < 0) return null
+        val arrBody = v2Body.substring(arrStart + 1, arrEnd)
+        return arrBody.split(',')
+            .map { it.trim().toDoubleOrNull() }
+            .takeWhile { it != null }
+            .take(6)
+            .let { if (it.size == 6) it else null }
+    }
+
+    private fun findMatchingBrace(s: String, start: Int): Int {
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (i in start until s.length) {
+            val c = s[i]
+            if (escaped) { escaped = false; continue }
+            if (c == '\\') { escaped = true; continue }
+            if (c == '"') { inString = !inString; continue }
+            if (inString) continue
+            when (c) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return i
+                }
+            }
+        }
+        return -1
+    }
+
+    private fun findMatchingBracket(s: String, start: Int): Int {
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (i in start until s.length) {
+            val c = s[i]
+            if (escaped) { escaped = false; continue }
+            if (c == '\\') { escaped = true; continue }
+            if (c == '"') { inString = !inString; continue }
+            if (inString) continue
+            when (c) {
+                '[' -> depth++
+                ']' -> {
+                    depth--
+                    if (depth == 0) return i
+                }
+            }
+        }
+        return -1
+    }
+
+    private fun extractJsonStringValue(s: String, start: Int): String? {
+        var i = start
+        while (i < s.length && s[i].isWhitespace()) i++
+        if (i >= s.length || s[i] != '"') return null
+        i++ // skip opening quote
+        val sb = StringBuilder()
+        while (i < s.length) {
+            val c = s[i]
+            if (c == '\\') {
+                i++
+                if (i < s.length) sb.append(s[i])
+            } else if (c == '"') {
+                return sb.toString()
+            } else {
+                sb.append(c)
+            }
+            i++
+        }
+        return null
+    }
+
+    private fun extractJsonIntValue(s: String, start: Int): Int? {
+        var i = start
+        while (i < s.length && s[i].isWhitespace()) i++
+        val startNum = i
+        while (i < s.length && (s[i].isDigit() || s[i] == '-' || s[i] == '+')) i++
+        if (i == startNum) return null
+        return s.substring(startNum, i).toIntOrNull()
+    }
+
+    private fun extractJsonDoubleValue(s: String, start: Int): Double? {
+        var i = start
+        while (i < s.length && s[i].isWhitespace()) i++
+        val startNum = i
+        while (i < s.length && (s[i].isDigit() || s[i] == '-' || s[i] == '+' || s[i] == '.' || s[i] == 'e' || s[i] == 'E')) i++
+        if (i == startNum) return null
+        return s.substring(startNum, i).toDoubleOrNull()
     }
 }
