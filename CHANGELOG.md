@@ -1,6 +1,14 @@
 # Журнал изменений — Branch `feat/bigmap-detection-fable`
 
-## 1bcf3e0 — Этап 5/6: метки всегда видны, цвет по этажу
+## 5bb6926 — P3 completion: V2 native entry point + cancellation guard
+
+- `CaptureService`: использует `nativeRegisterBigMapV2` (version=2 envelope) вместо legacy v1
+- `CaptureService`: cancellation guard после native return (проверка `ensureActive()` перед публикацией — поздний результат после паузы/отмены не публикуется)
+- `jni_bridge.cpp`: `nativeRegisterBigMapV2` emits version=2 в v2 envelope; legacy `nativeRegisterBigMap` emits version=1, оставлен для rollback
+- `BigMapGeometryDecoder.decodeStrictV1`: отрицательный тест совместимости (v2 payload к старому consumer → null geometry)
+- `BigMapGeometryVersionTest`: unit-тесты для v1/v2/unknown version/неполных полей
+
+## e987061 — Этап 5/6: метки всегда видны, цвет по этажу
 
 - `BigMapMarkerFilter`: показываются все этажи всегда; выбранный этаж = синий, остальные = серые с серой обводкой
 - `BigMapMarkerOverlay`: рендер выбранного этажа в синем, других этажей в сером
@@ -20,10 +28,10 @@
 
 ## 6d4c5e2 — Этап 3: детектор этажа grande карты
 
-- `BigMapLayerDetector`: определяет выбранный этаж по колонке кнопков уровней справа. Подсвеченная кнопка в нижней половине колонки = поверхность, иначе = уровень. При сомнении — `unknown` (неизвестный этаж ≠ поверхность)
+- `BigMapLayerDetector`: определяет выбранный этаж по колонке кнопок уровней справа. Подсвеченная кнопка в нижней половине колонки = поверхность, иначе = уровень. При сомнении — `unknown` (неизвестный этаж ≠ поверхность)
 - `BigMapLayerDetectorTest`: тесты surface/layer/unknown/empty bitmap
 
-## 79174e8 — Этап 1+2: стабильный якорь grande карты + индекс маркеров
+## 595f3ac — Этап 1+2: стабильный якорь grande карты + индекс маркеров
 
 ### Этап 1 — Данные маркеров Kongying
 - `KongyingMarkerStore`: потокобезопасное хранилище с индексом `space → список маркеров`. Методы: `replaceAll` (перестройка индекса), `upsert` (инкрементальное обновление с переносом между spaces), `remove`, `markersForSpace`, `markerById`, `allMarkers` (StateFlow), `markersForSpaceFlow` (отслеживание изменений)
@@ -41,11 +49,8 @@
 - `test_bigmap_session.cpp`: новые stage-2 тесты (стабильность якоря при малом сдвиге, восстановление после transient-плиточного изменения, сброс после 3 неудач, масштаб якоря независим от слоя)
 - `test_bigmap_session.cpp` (архив): перенесены старые тесты (изменённое поведение follow)
 
-## 595f3ac — Pre-stage (без коммита в ветке до squash)
-- `fixedbigmapplan.md`: стратегия отслеживания grande карты, инварианты C1–C6 (упрощённые), этапы 1–7
-
 ## 3545771 — Документ контракта C2/C3/C6 ослаблен
-- `research/bigmap_tracking_v2.md`: матрица может публиковаться для позиции игрока при неизвестном этаже; полная перепроверка эталонов только при сбросе/уходе/таймауте; первая версия может быть рабочей с флагом `markers_allowed`
+- `research/bigmap_tracking_v2.md`: матрица может публиковаться для позиции игрока при неизвестном этаже; полная перепроверка эталонов только при сбросе/уходе/таймауте; первая версия может быть рабочей с флагом `markers_allowed`; публикация разрешена в фазах tracking/moving/confirming
 
 ## Неотслеживаемые изменения (были до начала работы)
 - `DESIGN.md`, `PLAN.md`, `tracker/CMakeLists.txt`, `tracker/tests/bigmap_geometry_frames.cpp` — модифицированы до создания ветки
@@ -54,6 +59,31 @@
 - Десктоп C++: `test_bigmap_session`, `test_bigmap_geometry`, `test_bigmap_detector`, `test_bigmap_follow_mask`, `test_bigmap_acquisition`, `test_bigmap_replay_io`, `test_bigmap_competition`, `test_bigmap_pair_collection`, `test_bigmap_shadow`, `test_bigmap_revalidation`, `test_bigmap_local_geometry`, `benchmark_frames` — зелёные
 - Android CI: не запускался локально (запрещено планом), запустится автоматически при push в `feat/**` через GitHub Actions
 
-## Следующие этапы (не начаты)
-- P3: native state/ABI и Kotlin guard — атомарный snapshot, decoder с версионированием (уже частично в коде: `version` field, `decodeStrictV1`), инвалидация, владение ресурсами, L1–L3/I1
-- P4: CI и устройство — exact-commit Android CI, затем адресный сценарий на телефоне в режиме одного приложения: pan/zoom/stop, layer/space, пауза, Stop/Start, rotation, выход из покрытия. Миникарта должна сохранить поведение
+## Статус P3 (частично выполнено)
+- ✅ `BigMapGeometry.version` поле (>=1)
+- ✅ `BigMapGeometryDecoder.decode()` с версионным диспетчем: версия 1 и 2 принимаются, неизвестная версия → hidden без геометрии
+- ✅ `decodeStrictV1()`: отрицательный тест совместимости (v2 payload к старому consumer → null geometry)
+- ✅ `nativeRegisterBigMapV2`: нативная точка входа с version=2 в v2 envelope
+- ✅ `nativeRegisterBigMap` (legacy): emits version=1, оставлен для rollback
+- ✅ `BigMapGeometryVersionTest`: юнит-тесты для v1/v2/unknown version decoding
+- ⬜ Атомарный native snapshot с provenance (один владелец native-состояния)
+- ⬜ Проверка coroutine cancellation после завершения native (L1) — частично: CaptureService проверяет `ensureActive()` после native return
+- ⬜ Полная инвалидация при rotation/resize (L2) — частично: generation/resize сбрасывает сессию
+- ⬜ Native завис — матрица истекает независимо (L3) — частично: geometryExpiryJob убирает матрицу по timestamp
+
+## Статус P4 (не начат)
+- ⬜ Android CI через GitHub Actions (`./gradlew testDebugUnitTest assembleDebug --stacktrace`) — запустится автоматически при push в `feat/**`
+- ⬜ Адресный сценарий на телефоне: pan/zoom/stop, layer/space, пауза, Stop/Start, rotation, выход из покрытия — требует устройства
+- ⬜ Измерение FPS игры, нагрева, end-to-end задержки (только на устройстве)
+
+## Статус этапов 1–6 (выполнено)
+- Этап 1: `KongyingMarkerStore` с индексом по `space`, загрузка всех 46 чанков Kongying — закоммичено, тесты пройдены
+- Этап 2: фиксированный якорь grande карты, follow не сбрасывает якорь при малом сдвиге — закоммичено, C++ тесты зелёные
+- Этап 3: `BigMapLayerDetector.kt` — детектор этажа grande карты — закоммичено, тесты написаны
+- Этап 4: `BigMapMarkerFilter.kt` — фильтрация маркеров по espace/этажу/видимости — закоммичено, тесты пройдены
+- Этап 5: `BigMapMarkerOverlay.kt` + `OverlayService.kt` — Canvas-оверлей маркеров grande карты — закоммичено, тесты пройдены
+- Этап 6: `CaptureService.kt` — публикация геометрии в фазе tracking/moving/confirming — закоммичено
+
+## Следующие шаги
+- P4: Android CI запустится автоматически при push в `feat/**`. Адресное тестирование на устройстве требует устройства Samsung SM-S938B и разрешения на установку APK.
+- P3 (дописать при необходимости): нативный snapshot с provenance, полная инвалидация при rotation/resize, native завис — матрица истекает независимо.
