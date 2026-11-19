@@ -144,8 +144,9 @@ class OverlayService : Service() {
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
-            // Android 12+ untouchable application overlays require alpha <= 0.8f
-            alpha = 0.8f
+            // Android 12+ untouchable application overlays require alpha <= 0.8f.
+            // Use 0.5f so InputDispatcher does not drop game touch events through the overlay.
+            alpha = 0.5f
         }
         markerParams = params
         applyCalibrationToParams(params)
@@ -195,7 +196,7 @@ class OverlayService : Service() {
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
-            alpha = 0.8f
+            alpha = 0.5f
         }
         bigMapMarkerOverlay = BigMapMarkerOverlay(this)
         bigMapMarkerOverlay?.setDisplayMetrics(resources.displayMetrics)
