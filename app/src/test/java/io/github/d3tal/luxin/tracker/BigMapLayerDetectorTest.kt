@@ -3,10 +3,7 @@ package io.github.d3tal.luxin.tracker
 import android.graphics.Bitmap
 import android.graphics.Color
 import org.junit.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertFalse
-import kotlin.test.assertNotNull
-import kotlin.test.assertTrue
+import org.junit.Assert.*
 
 class BigMapLayerDetectorTest {
 

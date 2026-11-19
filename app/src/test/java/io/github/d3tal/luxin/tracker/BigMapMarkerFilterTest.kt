@@ -48,7 +48,7 @@ class BigMapMarkerFilterTest {
         )
 
         assertEquals(1, result.size)
-        assertEquals(1L, result[0].id)
+        assertEquals(1L, result[0].record.id)
     }
 
     @Test
@@ -92,7 +92,7 @@ class BigMapMarkerFilterTest {
         )
 
         assertEquals(1, result.size)
-        assertEquals(1L, result[0].id)
+        assertEquals(1L, result[0].record.id)
     }
 
     @Test
@@ -108,7 +108,7 @@ class BigMapMarkerFilterTest {
         )
 
         assertEquals(1, result.size)
-        assertEquals(1L, result[0].id)
+        assertEquals(1L, result[0].record.id)
     }
 
     @Test
