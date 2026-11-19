@@ -5,8 +5,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.locks.ReentrantLock
 
 /**
  * Потокобезопасное хранилище маркеров Kongying с индексом по пространству (space).
@@ -16,7 +15,7 @@ import kotlinx.coroutines.sync.withLock
  * Координаты разных пространств пересекаются — без индекса по space метки смешивать нельзя.
  */
 object KongyingMarkerStore {
-    private val mutex = Mutex()
+    private val lock = ReentrantLock()
     // Все загруженные маркеры, ключ — id маркера.
     private val markersById = mutableMapOf<Long, LocalMarkerRecord>()
     // Индекс: space -> список маркеров этого пространства.
@@ -29,14 +28,14 @@ object KongyingMarkerStore {
 
     /** Количество загруженных маркеров. */
     var size: Int
-        get() = mutex.withLock { markersById.size }
+        get() = lock.withLock { markersById.size }
 
     /**
      * Заменяет всё хранилище новым набором записей (вызывается после полной синхронизации).
      * Индекс по'espace перестраивается.
      */
     fun replaceAll(records: List<LocalMarkerRecord>) {
-        mutex.withLock {
+        lock.withLock {
             markersById.clear()
             markersBySpace.clear()
             for (r in records) {
@@ -44,29 +43,40 @@ object KongyingMarkerStore {
                 markersBySpace.getOrPut(r.space) { mutableListOf() }.add(r)
             }
         }
-        _allMarkers.value = records.toList()
+        _allMarkers.value = toSnapshot()
     }
 
     /**
      * Добавляет или обновляет одну запись (инкрементальное обновление по MD5 чанка).
+     * Если маркер с тем же id уже существует в другом space, старый индекс очищается.
      */
     fun upsert(record: LocalMarkerRecord) {
-        mutex.withLock {
+        val snapshot: List<LocalMarkerRecord>
+        lock.withLock {
+            val existing = markersById[record.id]
+            if (existing != null && existing.space != record.space) {
+                markersBySpace.getOrNull(existing.space)?.removeAll { it.id == record.id }
+            }
             markersById[record.id] = record
             markersBySpace.getOrPut(record.space) { mutableListOf() }.addIfNotPresent(record)
+            snapshot = toSnapshotUnlocked()
         }
-        _allMarkers.value = mutex.withLock { markersById.values.toList() }
+        _allMarkers.value = snapshot
     }
 
     /** Удаляет маркер по id. */
     fun remove(id: Long) {
-        mutex.withLock {
+        val snapshot: List<LocalMarkerRecord>
+        lock.withLock {
             val removed = markersById.remove(id)
             if (removed != null) {
                 markersBySpace[removed.space]?.removeAll { it.id == id }
+                // Удаляем пустые индексы пространств, чтобы не держать мёртвые ключи.
+                markersBySpace.removeAll { it.value.isEmpty() }
             }
+            snapshot = toSnapshotUnlocked()
         }
-        _allMarkers.value = mutex.withLock { markersById.values.toList() }
+        _allMarkers.value = snapshot
     }
 
     /**
@@ -74,20 +84,45 @@ object KongyingMarkerStore {
      * Пустой список, если пространство неизвестно или не загружено.
      */
     fun markersForSpace(space: String): List<LocalMarkerRecord> {
-        return mutex.withLock {
+        return lock.withLock {
             markersBySpace[space]?.toList() ?: emptyList()
         }
     }
 
     /** Возвращает маркер по id. */
     fun markerById(id: Long): LocalMarkerRecord? {
-        return mutex.withLock { markersById[id] }
+        return lock.withLock { markersById[id] }
     }
 
-    /** Поток маркеров заданного пространства (перевыдается при любом изменении хранилища). */
+    /**
+     * Поток маркеров заданного пространства.
+     * При любой мутации хранилища公開ывается новый снимок всем подписчикам.
+     */
     fun markersForSpaceFlow(space: String): Flow<List<LocalMarkerRecord>> = flow {
-        val initial = mutex.withLock { markersBySpace[space]?.toList() ?: emptyList() }
-        emit(initial)
+        while (true) {
+            emit(markersForSpace(space))
+            awaitNextChange()
+        }
+    }
+
+    private suspend fun awaitNextChange() = kotlinx.coroutines.withContext(
+        kotlinx.coroutines.Dispatchers.Default
+    ) {
+        // Простой polling-ожидание смены снимка; достаточно для UI-слоя.
+        val lastSnapshot = toSnapshot()
+        while (toSnapshot() == lastSnapshot) {
+            kotlinx.coroutines.delay(50)
+        }
+    }
+
+    /** Текущий снимок всех маркеров (вне локета, но вызывается только из локета в mutating методах). */
+    private fun toSnapshotUnlocked(): List<LocalMarkerRecord> {
+        return markersById.values.toList()
+    }
+
+    /** Текущий снимок всех маркеров (безопасно из любого контекста). */
+    private fun toSnapshot(): List<LocalMarkerRecord> {
+        return lock.withLock { toSnapshotUnlocked() }
     }
 
     private fun <T> MutableList<T>.addIfNotPresent(element: T) {

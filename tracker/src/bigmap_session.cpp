@@ -60,8 +60,6 @@ bool controlsUnchanged(const cv::Mat& anchor, const cv::Mat& current, BigMapFoll
     return true;
 }
 
-cv::Mat bigMapFollowComparisonMask(cv::Size size, const cv::Mat& anchor_to_current);
-
 bool follow(const cv::Mat& anchor, const std::vector<cv::KeyPoint>& anchor_points,
     const cv::Mat& anchor_descriptors, const cv::Mat& current, cv::Mat& transform, BigMapFollowStats& stats) {
     const auto reject = [&stats](const char* reason) { stats.outcome = reason; return false; };
@@ -157,6 +155,7 @@ bool follow(const cv::Mat& anchor, const std::vector<cv::KeyPoint>& anchor_point
     stats.outcome = "accepted";
     return true;
 }
+} // namespace
 
 cv::Mat bigMapFollowComparisonMask(cv::Size size, const cv::Mat& anchor_to_current) {
     if (size.width <= 0 || size.height <= 0 || anchor_to_current.size() != cv::Size(3, 2) ||
@@ -175,7 +174,6 @@ cv::Mat bigMapFollowComparisonMask(cv::Size size, const cv::Mat& anchor_to_curre
     cv::bitwise_and(valid, map_mask, valid);
     return valid;
 }
-} // namespace
 
 void BigMapSession::reset() {
     anchor_gray_.release();
@@ -281,7 +279,18 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
         // Follow failed or appearance changed: do not destroy geometry_anchor_, do not publish.
         not_ok_counter_++;
         if (not_ok_counter_ >= MAX_NOT_OK) {
-            reset();
+            // Discard anchor but preserve the SIFT cooldown and observation timestamp.
+            // A full reset() would forget last_attempt_ and let SIFT re-run too soon.
+            anchor_gray_.release();
+            anchor_descriptors_.release();
+            anchor_keypoints_.clear();
+            anchor_ = {};
+            geometry_anchor_ = {};
+            previous_transform_.release();
+            stable_frames_ = 0;
+            appearance_suspended_ = false;
+            suspended_still_frames_ = 0;
+            not_ok_counter_ = 0;
             result.reset_reason = "follow_failed";
             result.phase = "acquiring";
             return result;
@@ -291,10 +300,16 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
         result.appearance_suspended = true;
         result.suspended_still_frames = suspended_still_frames_;
         result.reset_reason = "follow_failed";
+        if (movement_measured) {
+            previous_transform_ = transform.clone();
+        }
         if (appearance_failure && movement > 0.6) {
             result.phase = "moving";
             return result;
         }
+        // appearance_failure with movement <= 0.6, or non-appearance failure:
+        // keep geometry_anchor_ but mark space unverified. Do not publish through follow;
+        // only SIFT revalidation restores verified space.
         result.phase = "confirming";
         return result;
     }
