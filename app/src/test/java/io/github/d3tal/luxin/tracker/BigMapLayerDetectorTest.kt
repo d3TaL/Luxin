@@ -16,7 +16,7 @@ class BigMapLayerDetectorTest {
         val inButton = x >= buttonX && x < buttonX + buttonSize && y >= buttonY && y < buttonY + buttonSize
         if (inButton) {
             brightness shl 16 or brightness shl 8 or brightness or 0xFF000000
-        } else if (x >= width * 0.88 && x <= width * 0.96) {
+        } else if (x >= (width * 0.88).toInt() && x <= (width * 0.96).toInt()) {
             0xFF1E1E1E
         } else {
             0xFF0A0A0A
