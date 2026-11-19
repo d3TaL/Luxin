@@ -80,7 +80,7 @@ object KongyingMarkerStore {
             val removed = markersById.remove(id)
             if (removed != null) {
                 markersBySpace.values.forEach { it.removeAll { it.id == id } }
-                val emptyKeys = markersBySpace.keys.filter { markersBySpace[key]!!.isEmpty() }
+                val emptyKeys = markersBySpace.keys.filter { k -> markersBySpace[k]!!.isEmpty() }
                 emptyKeys.forEach { markersBySpace.remove(it) }
             }
             snapshot = toSnapshotUnlocked()

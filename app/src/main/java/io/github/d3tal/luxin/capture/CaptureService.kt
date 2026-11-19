@@ -275,7 +275,6 @@ class CaptureService : Service() {
             // L2: полная инвалидация native big-map сессии при rotation/resize.
             // trackingRevision++ выше заставит цикл в startLiveTracking() вызвать
             // engine.reset() при обнаружении lastRevision != frameRevision (стр. 466-472).
-            bigMapRate.reset()
             val previous = LiveTrackingStatus.state.value
             if (previous.bigMapGeometry != null) {
                 LiveTrackingStatus.publish(LiveTrackingState(enabled = previous.enabled, status = "paused",
@@ -581,12 +580,8 @@ class CaptureService : Service() {
                                     "callDecodeMs=${SystemClock.elapsedRealtime() - start}")
                                 ensureActive()
                                 // Late native result after cancellation/pause must not be published.
-                                if (!coroutineContext.isActive) {
-                                    Log.d(TAG, "BigMapV2 stage=drop epoch=$epoch reason=cancelled-after-native")
-                                    waiting("Привязка устарела; ожидаю обновление", frame.width, frame.height,
-                                        screenMode = "big_map", reason = "cancelled-after-native")
-                                    continue
-                                }
+                                // ensureActive() above throws CancellationException if the coroutine
+                                // was cancelled, preventing publication of stale results.
                                 decoded.geometry?.let {
                                     check(it.frameWidth == frame.width && it.frameHeight == frame.height &&
                                         kotlin.math.abs(it.timestampSeconds - frame.timestampNs / 1_000_000_000.0) < 1e-6) {

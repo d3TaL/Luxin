@@ -139,7 +139,7 @@ object BigMapLayerDetector {
                 maxX = group.maxOf { it.x },
                 minY = group.minOf { it.y },
                 maxY = group.maxOf { it.y },
-                avgBrightness = group.averageOf { it.brightness.toDouble() },
+                avgBrightness = if (group.isEmpty()) 0.0 else group.sumOf { it.brightness.toDouble() } / group.size,
                 centerY = (group.minOf { it.y } + group.maxOf { it.y }) / 2
             )
         }
