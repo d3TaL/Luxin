@@ -419,19 +419,15 @@ class OverlayService : Service() {
                     }
                 }
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
-            hideOverlay() // Also remove the marker if adding the second (HUD) window failed.
         }
-    }
 
-    private fun applyCalibrationToParams(params: WindowManager.LayoutParams) {
-        val size = ceil(calibration.r * 2f + 8f).toInt()
-        params.width = size
-        params.height = size
-        params.x = (calibration.cx - size / 2f).roundToInt()
-        params.y = (calibration.cy - size / 2f).roundToInt()
-    }
+        private fun applyCalibrationToParams(params: WindowManager.LayoutParams) {
+            val size = ceil(calibration.r * 2f + 8f).toInt()
+            params.width = size
+            params.height = size
+            params.x = (calibration.cx - size / 2f).roundToInt()
+            params.y = (calibration.cy - size / 2f).roundToInt()
+        }
 
     private fun adjust(dxSign: Float, dySign: Float, drSign: Float) {
         val step = STEPS_PX[stepIndex].toFloat()
