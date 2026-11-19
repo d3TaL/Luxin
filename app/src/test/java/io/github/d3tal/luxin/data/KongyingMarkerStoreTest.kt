@@ -45,7 +45,7 @@ class KongyingMarkerStoreTest {
         KongyingMarkerStore.upsert(marker(1, "twt702", 999.0, 888.0))
 
         val updated = KongyingMarkerStore.markerById(1)
-        assertTrue(updated != null)
+        requireNotNull(updated)
         assertEquals(999.0, updated.x, 0.001)
         assertEquals(888.0, updated.y, 0.001)
         assertEquals(1, KongyingMarkerStore.markersForSpace("twt702").size)

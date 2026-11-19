@@ -300,17 +300,7 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
         result.appearance_suspended = true;
         result.suspended_still_frames = suspended_still_frames_;
         result.reset_reason = "follow_failed";
-        if (movement_measured) {
-            previous_transform_ = transform.clone();
-        }
-        if (appearance_failure && movement > 0.6) {
-            result.phase = "moving";
-            return result;
-        }
-        // appearance_failure with movement <= 0.6, or non-appearance failure:
-        // keep geometry_anchor_ but mark space unverified. Do not publish through follow;
-        // only SIFT revalidation restores verified space.
-        result.phase = "confirming";
+        result.phase = movement > 0.6 ? "moving" : "confirming";
         return result;
     }
 
