@@ -1,7 +1,6 @@
 package io.github.d3tal.luxin.tracker
 
 import android.graphics.Bitmap
-import android.graphics.Color
 
 /**
  * Решение об этаже grande карты.
@@ -9,11 +8,6 @@ import android.graphics.Color
  * `layerId == null && isSurface == true` — выбрана поверхность.
  * `layerId != null && isSurface == false` — выбран подземный/надземный уровень.
  * `mode == "unknown"` — этаж не определён. Неизвестный этаж ≠ поверхность.
- *
- * По DESIGN.md: поверхность должна быть явным ID, не значением по умолчанию.
- * Этот детектор использует консервативную эвристику: подсвеченную кнопку в
- * нижней части колонки traktует как поверхность, иначе — как уровень.
- * Точное определение требует сверки с изображением уровня Kongying (этап 4).
  */
 data class LayerDecision(
     val layerId: String?,
@@ -69,6 +63,16 @@ private fun clusterVertically(candidates: List<ButtonRect>, maxGap: Int): List<B
 object BigMapLayerDetector {
 
     /**
+     * Извлекает компоненты цвета из ARGB int без зависимости от android.graphics.Color.
+     */
+    private fun brightnessOf(argb: Int): Int {
+        val red = (argb shr 16) and 0xFF
+        val green = (argb shr 8) and 0xFF
+        val blue = argb and 0xFF
+        return (red * 0.299 + green * 0.587 + blue * 0.114).toInt()
+    }
+
+    /**
      * Определяет этаж grande карты на кадре.
      *
      * @param width ширина кадра в пикселях.
@@ -100,7 +104,7 @@ object BigMapLayerDetector {
         for (y in 0 until height step stepY) {
             for (x in x0 until x1 step stepX) {
                 val c = getPixel(x, y)
-                val brightness = (Color.red(c) * 0.299 + Color.green(c) * 0.587 + Color.blue(c) * 0.114).toInt()
+                val brightness = brightnessOf(c)
                 // Подсвеченная кнопка — существенно ярче окружающего темного UI.
                 if (brightness > BRIGHTNESS_THRESHOLD) {
                     buttonCandidates.add(ButtonRect(x, y, brightness))
