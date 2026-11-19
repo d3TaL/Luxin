@@ -5,6 +5,8 @@
 #include "luxin/bigmap_session.hpp"
 #include <array>
 #include <cassert>
+#include <chrono>
+#include <condition_variable>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -14,7 +16,49 @@
 
 using namespace luxin;
 
+namespace luxin {
+struct BigMapSessionTestAccess {
+    static void awaitRefresh(BigMapSession& session) {
+        assert(session.renewal_.valid());
+        if (session.renewal_.wait_for(std::chrono::seconds(30)) != std::future_status::ready) std::abort();
+    }
+};
+}
+
 namespace {
+
+// Hold a complete search in flight without sleeping or relying on relative thread speeds.
+struct RefreshBarrier {
+    std::mutex mutex;
+    std::condition_variable changed;
+    int entered = 0, released = 0;
+    bool wrong_space = false;
+
+    void waitFor(int& counter, int n) {
+        std::unique_lock<std::mutex> lock(mutex);
+        if (!changed.wait_for(lock, std::chrono::seconds(30), [&] { return counter >= n; })) std::abort();
+    }
+    void release(int n) {
+        std::lock_guard<std::mutex> lock(mutex);
+        released = n;
+        changed.notify_all();
+    }
+};
+RefreshBarrier* active_barrier = nullptr;
+
+BigMapGeometry controlledRefresh(const cv::Mat& frame, const std::vector<std::shared_ptr<LayerReference>>& refs,
+    double timestamp, BigMapRegistrationStats* stats) {
+    auto& b = *active_barrier;
+    {
+        std::unique_lock<std::mutex> lock(b.mutex);
+        const int ticket = ++b.entered;
+        b.changed.notify_all();
+        if (!b.changed.wait_for(lock, std::chrono::seconds(30), [&] { return b.released >= ticket; })) std::abort();
+    }
+    auto g = registerBigMap(frame, refs, timestamp, stats);
+    if (b.wrong_space) g.space = "conflict";
+    return g;
+}
 
 BigMapSessionResult acquireSettled(BigMapSession& session, const cv::Mat& frame,
     const std::vector<std::shared_ptr<LayerReference>>& refs, double timestamp) {
@@ -41,6 +85,131 @@ void assertFollowAccepted(const BigMapFollowStats& follow, cv::Size working_size
     assert(follow.hull_fraction >= 0.015);
     assert(follow.overlap_fraction >= 0.20);
     assert(follow.changed_fraction <= 0.025);
+}
+
+void testSeamlessRenewal(const cv::Mat& frame, const std::shared_ptr<LayerReference>& ref) {
+    RefreshBarrier b;
+    active_barrier = &b;
+    BigMapSession session(controlledRefresh);
+    acquireSettled(session, frame, {ref}, 1.0);
+    session.update(frame, {ref}, 1.25);
+    auto first = session.update(frame, {ref}, 1.5);
+    int starts = 0, adoptions = 0;
+    double source = -1;
+    for (double t = 2; t <= 32; t += 0.5) {
+        auto r = session.update(frame, {ref}, t);
+        assert(r.phase == "tracking" && r.geometry.timestamp_seconds == t && !r.absolute_attempted);
+        assert(equivalentBigMapGeometry(first.geometry, r.geometry));
+        if (std::string(r.refresh) == "started") {
+            b.waitFor(b.entered, ++starts);
+            source = t;
+        }
+        if (t == source + 1) { // normal fresh publications continued while the SIFT worker was blocked
+            b.release(starts);
+            BigMapSessionTestAccess::awaitRefresh(session);
+        }
+        if (std::string(r.refresh) == "adopted") {
+            ++adoptions;
+            assert(session.snapshot().geometry.timestamp_seconds == source); // not adoption time
+        }
+    }
+    b.release(100); // the last search may be in flight at destruction
+    assert(adoptions >= 4);
+}
+
+void testLateRenewal(const cv::Mat& frame, const std::shared_ptr<LayerReference>& ref, bool pause) {
+    RefreshBarrier b;
+    active_barrier = &b;
+    BigMapSession session(controlledRefresh);
+    acquireSettled(session, frame, {ref}, 1.0);
+    session.update(frame, {ref}, 1.5);
+    assert(std::string(session.update(frame, {ref}, 7.0).refresh) == "started");
+    b.waitFor(b.entered, 1);
+    double t = pause ? 7.15 : 11.01;
+    if (pause) session.reset(); // hide/show before completion; no frame-size change
+    auto hidden = session.update(frame, {ref}, t);
+    assert(hidden.geometry.matrix.empty() && !hidden.absolute_attempted && hidden.anchor_expired == !pause);
+    b.release(1);
+    BigMapSessionTestAccess::awaitRefresh(session);
+    for (int i = 1; i <= 3; ++i) {
+        auto after = session.update(frame, {ref}, t + i * 0.1);
+        assert(after.geometry.matrix.empty() && !after.absolute_attempted && std::string(after.refresh) != "adopted");
+    }
+}
+
+void testConflictingRenewal(const cv::Mat& frame, const std::shared_ptr<LayerReference>& ref) {
+    RefreshBarrier b;
+    b.wrong_space = true;
+    active_barrier = &b;
+    BigMapSession session(controlledRefresh);
+    cv::Mat base = frame.clone(), pan;
+    const cv::Mat motion = (cv::Mat_<double>(2, 3) << 1, 0, 4, 0, 1, 2);
+    cv::warpAffine(frame, pan, motion, frame.size());
+    for (auto* im : {&base, &pan}) (*im)(cv::Rect(1010, 0, 550, 720)).setTo(30);
+    acquireSettled(session, base, {ref}, 1.0);
+    session.update(base, {ref}, 1.5);
+    assert(std::string(session.update(base, {ref}, 7.0).refresh) == "started");
+    b.release(1);
+    BigMapSessionTestAccess::awaitRefresh(session);
+    auto r = session.update(pan, {ref}, 7.25, nullptr, nullptr, true);
+    assert(std::string(r.follow.outcome) == "accepted" && r.movement_px > 0.6);
+    assert(std::string(r.refresh) == "conflict" && !r.measured_motion && r.geometry.matrix.empty());
+    assert(r.follow.debug_points.empty());
+    assert(r.phase == "acquiring" && session.snapshot().geometry.matrix.empty());
+}
+
+void testNoRefreshAtCutoff(const cv::Mat& frame, const std::shared_ptr<LayerReference>& ref) {
+    BigMapSession session(registerBigMap);
+    acquireSettled(session, frame, {ref}, 1.0);
+    session.update(frame, {ref}, 1.5);
+    auto last = session.update(frame, {ref}, 11.0);
+    assert(last.phase == "tracking" && std::string(last.refresh) == "none");
+    auto expired = session.update(frame, {ref}, 11.1);
+    assert(expired.anchor_expired && expired.geometry.matrix.empty());
+}
+
+void testRenewalDuringStopStart(const cv::Mat& frame, const std::shared_ptr<LayerReference>& ref) {
+    RefreshBarrier b;
+    active_barrier = &b;
+    auto old = std::make_unique<BigMapSession>(controlledRefresh);
+    acquireSettled(*old, frame, {ref}, 1.0);
+    old->update(frame, {ref}, 1.5);
+    assert(std::string(old->update(frame, {ref}, 7.0).refresh) == "started");
+    b.waitFor(b.entered, 1);
+    old->reset();
+    auto closing = std::async(std::launch::async, [owner = std::move(old)]() mutable { owner.reset(); });
+    BigMapSession next(controlledRefresh);
+    acquireSettled(next, frame, {ref}, 7.8);
+    next.update(frame, {ref}, 8.3);
+    auto checked = next.update(frame, {ref}, 14.0);
+    assert(checked.phase == "tracking" && std::string(checked.refresh) == "none"); // no queued worker
+    b.release(1);
+    closing.get();
+    assert(next.snapshot().geometry.timestamp_seconds == 7.8); // late worker never changed new owner
+}
+
+void testMeasuredPanAndPoints(const cv::Mat& map, const std::shared_ptr<LayerReference>& ref) {
+    // Constant screen-fixed controls, so pan should pass both geometry AND appearance.
+    auto fixedControls = [](cv::Mat& image) {
+        image(cv::Rect(1010, 0, 550, 720)).setTo(30);
+    };
+    cv::Mat base = map.clone(), pan;
+    const cv::Mat translation = (cv::Mat_<double>(2, 3) << 1, 0, 4, 0, 1, 2);
+    cv::warpAffine(map, pan, translation, map.size());
+    fixedControls(base); fixedControls(pan);
+    BigMapSession session;
+    acquireSettled(session, base, {ref}, 1.0);
+    session.update(base, {ref}, 1.2);
+    auto stable = session.update(base, {ref}, 1.4);
+    assert(stable.phase == "tracking" && stable.follow.debug_points.empty());
+    auto moved = session.update(pan, {ref}, 1.6, nullptr, nullptr, true);
+    assert(std::string(moved.follow.outcome) == "accepted" && moved.phase == "moving" && moved.measured_motion);
+    assert(moved.geometry.timestamp_seconds == 1.6 && !moved.geometry.matrix.empty());
+    assert(std::abs(moved.geometry.matrix.at<double>(0, 2) - stable.geometry.matrix.at<double>(0, 2) - 4) < 1.0);
+    assert(!moved.follow.debug_points.empty() && moved.follow.debug_points.size() <= 48);
+    for (auto p : moved.follow.debug_points) assert(p.x >= 0 && p.y >= 0 && p.x < pan.cols && p.y < pan.rows);
+    auto lost = session.update(cv::Mat::zeros(map.size(), map.type()), {ref}, 1.8, nullptr, nullptr, true);
+    assert(!lost.measured_motion && lost.geometry.matrix.empty() && lost.follow.debug_points.empty());
 }
 
 // Stage-2: geometry anchor stays stable across small shifts; follow composes matrix.
@@ -89,14 +258,13 @@ void testTransientFailureKeepsAnchor(const cv::Mat& frame,
     session.update(frame, {ref}, 1.5);
     assert(session.update(frame, {ref}, 2.0).geometry.mode == "found");
 
-    // One appearance failure: anchor survives, geometry published (last known matrix).
+    // One appearance failure: anchor survives privately, but no current geometry is emitted.
     // Follow continues against the fixed anchor; next clean frame recovers publishing.
     cv::Mat tile_edit = frame.clone();
     tile_edit(cv::Rect(630, 360, 90, 90)).setTo(250);
     auto fail1 = session.update(tile_edit, {ref}, 3.5);
     assert(!fail1.absolute_attempted);
-    // Geometry published: last known matrix, markers stay on screen moving with map.
-    assert(!fail1.geometry.matrix.empty());
+    assert(fail1.geometry.matrix.empty() && !fail1.measured_motion);
     assert(std::string(fail1.follow.outcome) == "tile_change");
 
     // Clean frame: tracking recovers against same anchor without absolute re-search.
@@ -230,6 +398,13 @@ int main() {
     testMovingMapKeepsAnchor(frame, ref);
     testAnchorIndependentOfLayer(frame, ref);
     testSnapshotAtomicNoNewComputation(frame, ref);
+    testSeamlessRenewal(frame, ref);
+    testLateRenewal(frame, ref, true);
+    testLateRenewal(frame, ref, false);
+    testConflictingRenewal(frame, ref);
+    testNoRefreshAtCutoff(frame, ref);
+    testRenewalDuringStopStart(frame, ref);
+    testMeasuredPanAndPoints(frame, ref);
 
     std::cout << "big-map stage-2 anchor stability tests passed\n";
     return 0;

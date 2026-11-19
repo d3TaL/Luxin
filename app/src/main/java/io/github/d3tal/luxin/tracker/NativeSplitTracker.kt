@@ -84,16 +84,16 @@ class NativeSplitTracker(unitScale: Double = 0.0) : Closeable {
      * This is the only entry point for production v2; legacy found path is preserved for rollback.
      */
     @Synchronized
-    fun registerBigMapV2Json(frameBitmap: Bitmap, timestampSeconds: Double): String {
+    fun registerBigMapV2Json(frameBitmap: Bitmap, timestampSeconds: Double, debugPoints: Boolean = false): String {
         if (handle == 0L) return "{\"error\":\"closed tracker\"}"
         require(timestampSeconds.isFinite() && timestampSeconds >= 0)
-        return nativeRegisterBigMapV2(handle, frameBitmap, timestampSeconds)
+        return nativeRegisterBigMapV2(handle, frameBitmap, timestampSeconds, debugPoints)
     }
 
     private external fun nativeRegisterBigMap(handle: Long, frameBitmap: Bitmap, timestampSeconds: Double): String
 
     /** V2 native entry point with version=2 in payload. */
-    private external fun nativeRegisterBigMapV2(handle: Long, frameBitmap: Bitmap, timestampSeconds: Double): String
+    private external fun nativeRegisterBigMapV2(handle: Long, frameBitmap: Bitmap, timestampSeconds: Double, debugPoints: Boolean): String
 
     /**
      * Атомарный снимок текущего состояния сессии без запуска нового вычисления SIFT.

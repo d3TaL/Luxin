@@ -25,6 +25,7 @@ import android.widget.TextView
 import io.github.d3tal.luxin.capture.CaptureService
 import io.github.d3tal.luxin.tracker.BigMapMarkerFilter
 import io.github.d3tal.luxin.tracker.BigMapMarkerOverlay
+import io.github.d3tal.luxin.tracker.LiveTrackingState
 import io.github.d3tal.luxin.tracker.LiveTrackingStatus
 import io.github.d3tal.luxin.tracker.formatTrackingHud
 import kotlinx.coroutines.CoroutineScope
@@ -72,6 +73,8 @@ class OverlayService : Service() {
 
         private val _isShowing = MutableStateFlow(false)
         val isShowing: StateFlow<Boolean> = _isShowing.asStateFlow()
+        @Volatile var showTrackingPoints = false
+            private set
 
         fun start(context: Context) {
             context.startService(Intent(context, OverlayService::class.java).apply {
@@ -267,6 +270,29 @@ class OverlayService : Service() {
         }
         trackButton.isEnabled = CaptureService.isRunning.value
 
+        fun renderMap(s: LiveTrackingState) {
+            val overlay = bigMapMarkerOverlay ?: return
+            val g = s.bigMapGeometry
+            val layer = s.markerLayer
+            val markers = if (g != null && layer != null) BigMapMarkerFilter.filterMarkersForBigMap(
+                g.space, layer, s.frameWidth, s.frameHeight, g) else emptyList()
+            val points = showTrackingPoints && s.screenMode == "big_map" && g != null && g.framePoints.isNotEmpty()
+            if (g != null && (points || markers.isNotEmpty())) {
+                overlay.setMarkers(markers, g, points)
+                overlay.visibility = View.VISIBLE
+            } else {
+                overlay.visibility = View.INVISIBLE
+                overlay.clear()
+            }
+        }
+        val debugButton = hudButton("Точки трекинга: выкл") { }.apply {
+            setOnClickListener {
+                showTrackingPoints = !showTrackingPoints
+                text = if (showTrackingPoints) "Точки трекинга: вкл" else "Точки трекинга: выкл"
+                renderMap(LiveTrackingStatus.state.value)
+            }
+        }
+
         val snapButton = hudButton("📸 Снимок (обычный)") {
             CaptureService.takeSnapshot(this, hideOverlayDuringCapture = false)
         }
@@ -315,6 +341,7 @@ class OverlayService : Service() {
             orientation = LinearLayout.VERTICAL
             addView(trackingText)
             addView(trackButton)
+            addView(debugButton)
             addView(statusText)
             addView(calText)
             addView(hudButton("Настроить кольцо / Готово") {
@@ -403,23 +430,7 @@ class OverlayService : Service() {
 
             // HUD geometry alone does not authorize choosing a floor for item markers.
             scope.launch {
-                LiveTrackingStatus.state.collect { s ->
-                    val layerDecision = s.markerLayer
-                    if (s.bigMapGeometry != null && layerDecision != null) {
-                        val filtered = BigMapMarkerFilter.filterMarkersForBigMap(
-                            s.bigMapGeometry.space,
-                            layerDecision,
-                            s.frameWidth,
-                            s.frameHeight,
-                            s.bigMapGeometry
-                        )
-                        bigMapMarkerOverlay?.setMarkers(filtered, s.bigMapGeometry)
-                        bigMapMarkerOverlay?.visibility = if (filtered.isEmpty()) View.INVISIBLE else View.VISIBLE
-                    } else {
-                        bigMapMarkerOverlay?.visibility = View.INVISIBLE
-                        bigMapMarkerOverlay?.clear()
-                    }
-                }
+                LiveTrackingStatus.state.collect { renderMap(it) }
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -470,6 +481,7 @@ class OverlayService : Service() {
     }
 
     private fun hideOverlay() {
+        showTrackingPoints = false
         markerOverlayView?.let { view ->
             try {
                 windowManager?.removeView(view)

@@ -56,6 +56,27 @@ class BigMapGeometryVersionTest {
         assertNull(BigMapGeometryDecoder.decodeLiveV2(live().replace("\"v2\":", "\"snapshot_revision\":9,\"v2\":")).geometry)
     }
 
+    @Test fun onlyExplicitMeasuredMotionExposesMovingGeometry() {
+        fun tagged(phase: String, value: Boolean) = live(phase).replace("\"version\":2", "\"version\":2,\"measuredMotion\":$value")
+        val moved = BigMapGeometryDecoder.decodeLiveV2(tagged("moving", true))
+        assertEquals("moving", moved.phase)
+        assertEquals(2, requireNotNull(moved.geometry).version)
+        for (raw in listOf(tagged("moving", false), tagged("confirming", true),
+                tagged("moving", true).replace("\"found\"", "\"rejected\"))) {
+            assertNull(BigMapGeometryDecoder.decodeLiveV2(raw).geometry)
+        }
+    }
+
+    @Test fun debugInliersUseCurrentFramePixelsAndRequireAcceptedGeometry() {
+        val pts = fields + ",\"framePoints\":[125.5,80,3119,1439]"
+        val geometry = requireNotNull(BigMapGeometryDecoder.decodeLiveV2(live(body = pts)).geometry)
+        assertEquals(listOf(125.5, 80.0, 3119.0, 1439.0), geometry.framePoints)
+        assertNull(BigMapGeometryDecoder.decodeLiveV2(live("moving", pts)).geometry)
+        for (bad in listOf("0", "-1,1", "0,1440", (0..97).joinToString(",") { "0" })) {
+            assertNull(BigMapGeometryDecoder.decodeLiveV2(live(body = fields + ",\"framePoints\":[$bad]")).geometry)
+        }
+    }
+
     @Test fun malformedNestedGeometryCannotBorrowOuterFieldsOrTruncateTheMatrix() {
         val matrix = "\"matrix\":[1,0,100,0,1,200]"
         val noMatrix = fields.substringBefore(",$matrix")

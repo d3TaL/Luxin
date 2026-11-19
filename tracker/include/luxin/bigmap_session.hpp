@@ -3,6 +3,7 @@
 #include "luxin/bigmap_geometry.hpp"
 
 #include <array>
+#include <future>
 
 namespace luxin {
 
@@ -44,6 +45,7 @@ struct BigMapFollowStats {
     int worst_tile_changed_pixels = -1;
     double worst_tile_changed_fraction = -1.0;
     std::array<BigMapControlStats, 2> controls{};
+    std::vector<cv::Point2f> debug_points; // accepted inlier destinations in working-image pixels, max 8x6
     bool geometry_accepted = false; // all sparse gates passed; NOT permission to publish
 };
 
@@ -57,6 +59,8 @@ struct BigMapSessionResult {
     BigMapGeometry geometry;
     std::string phase = "acquiring";
     bool absolute_attempted = false;
+    const char* refresh = "none"; // started, adopted, discarded, conflict
+    bool measured_motion = false; // accepted current-frame follow of a previously confirmed anchor
     BigMapRegistrationStats registration;
     double follow_ms = 0.0;
     BigMapFollowStats follow;
@@ -90,10 +94,15 @@ using BigMapSessionDiagnosticSink = void (*)(const BigMapSessionResult&, void*) 
 // fixed settling-origin transforms may schedule SIFT but never contribute to geometry.
 class BigMapSession {
 public:
+    using RefreshSearch = BigMapGeometry (*)(const cv::Mat&,
+        const std::vector<std::shared_ptr<LayerReference>>&, double, BigMapRegistrationStats*);
+    // Only the live owner opts in. Replay without a worker retains deterministic capture-time semantics.
+    explicit BigMapSession(RefreshSearch refresh_search = nullptr) : refresh_search_(refresh_search) {}
     void reset();
     BigMapSessionResult update(const cv::Mat& frame,
         const std::vector<std::shared_ptr<LayerReference>>& references, double timestamp_seconds,
-        BigMapSessionDiagnosticSink before_absolute = nullptr, void* diagnostic_context = nullptr);
+        BigMapSessionDiagnosticSink before_absolute = nullptr, void* diagnostic_context = nullptr,
+        bool debug_points = false);
 
     // Атомарный снимок текущего состояния без запуска нового вычисления.
     // Возвращает копию снимка на момент вызова; вызывающий может сравнить
@@ -104,6 +113,21 @@ public:
     int snapshot_revision() const;
 
 private:
+    friend struct BigMapSessionTestAccess; // synchronize deterministic tests at future readiness
+    struct Renewal {
+        BigMapGeometry absolute, expected;
+        cv::Mat gray;
+        std::vector<cv::KeyPoint> points;
+        cv::Mat descriptors;
+    };
+    void renew(const cv::Mat& frame, const cv::Mat& small, const std::vector<std::shared_ptr<LayerReference>>& refs,
+               BigMapSessionResult& result, bool debug_points);
+    RefreshSearch refresh_search_;
+    std::future<Renewal> renewal_;
+    bool renewal_valid_ = false;
+    bool renewal_can_adopt_ = false;
+    bool confirmed_anchor_ = false;
+    double last_refresh_ = -1;
     // Опубликованная абсолютная привязка (регистрация registerBigMap). Не перезаписывается follow'ом.
     BigMapGeometry geometry_anchor_;
 

@@ -40,8 +40,16 @@ struct Candidate {
     double score;
 };
 
-bool equivalent(const BigMapGeometry& a, const BigMapGeometry& b) {
-    if (a.space != b.space) return false;
+} // namespace
+
+bool equivalentBigMapGeometry(const BigMapGeometry& a, const BigMapGeometry& b) {
+    if (a.space.empty() || a.space != b.space || a.frame_width != b.frame_width ||
+        a.frame_height != b.frame_height || a.frame_width <= 0 || a.frame_height <= 0) return false;
+    for (const auto* m : {&a.matrix, &b.matrix}) {
+        if (m->type() != CV_64F || m->size() != cv::Size(3, 2) || !cv::checkRange(*m)) return false;
+        const double det = cv::determinant((*m)(cv::Rect(0, 0, 2, 2)));
+        if (!std::isfinite(det) || det <= 1e-16) return false;
+    }
     cv::Mat inverse;
     cv::invertAffineTransform(a.matrix, inverse);
     // Compare the entire frame, not just its centre (different scales may share a centre).
@@ -51,11 +59,11 @@ bool equivalent(const BigMapGeometry& a, const BigMapGeometry& b) {
         const double y = inverse.at<double>(1, 0) * p.x + inverse.at<double>(1, 1) * p.y + inverse.at<double>(1, 2);
         const double bx = b.matrix.at<double>(0, 0) * x + b.matrix.at<double>(0, 1) * y + b.matrix.at<double>(0, 2);
         const double by = b.matrix.at<double>(1, 0) * x + b.matrix.at<double>(1, 1) * y + b.matrix.at<double>(1, 2);
-        if (std::hypot(bx - p.x, by - p.y) > 8.0 * a.frame_height / 1440.0) return false;
+        const double error = std::hypot(bx - p.x, by - p.y);
+        if (!std::isfinite(error) || error > 8.0 * a.frame_height / 1440.0) return false;
     }
     return true;
 }
-} // namespace
 
 BigMapGeometry registerBigMap(const cv::Mat& frame,
     const std::vector<std::shared_ptr<LayerReference>>& references, double timestamp_seconds,
@@ -162,7 +170,7 @@ BigMapGeometry registerBigMap(const cv::Mat& frame,
     std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) { return a.score > b.score; });
     for (size_t i = 1; i < candidates.size(); ++i) {
         if (candidates[i].score >= candidates[0].score * 0.8 &&
-            !equivalent(candidates[0].geometry, candidates[i].geometry)) {
+            !equivalentBigMapGeometry(candidates[0].geometry, candidates[i].geometry)) {
             rejected.mode = "ambiguous";
             return rejected;
         }

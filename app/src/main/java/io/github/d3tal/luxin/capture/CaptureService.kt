@@ -580,7 +580,7 @@ class CaptureService : Service() {
                                 val start = SystemClock.elapsedRealtime()
                                 val observed = BigMapFrame(frameRevision, frame.generation, frame.timestampNs, frame.width, frame.height)
                                 val decoded = BigMapGeometryDecoder.decodeLiveV2(engine.registerBigMapV2Json(
-                                    bitmap, frame.timestampNs / 1_000_000_000.0))
+                                    bitmap, frame.timestampNs / 1_000_000_000.0, OverlayService.showTrackingPoints))
                                 // A return log is NOT publication: cancellation/freshness gates below are unchanged.
                                 Log.d(TAG, "BigMapV2 stage=native_return $diagnosticKey phase=${decoded.phase} mode=${decoded.mode} version=${decoded.version} " +
                                     "callDecodeMs=${SystemClock.elapsedRealtime() - start}")

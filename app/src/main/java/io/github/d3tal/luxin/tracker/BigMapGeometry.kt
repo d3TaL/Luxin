@@ -24,7 +24,8 @@ data class BigMapGeometry(
     val matches: Int,
     val errorPx: Double,
     val support: Double,
-    val version: Int = 1
+    val version: Int = 1,
+    val framePoints: List<Double> = emptyList() // Debug-only x,y pairs in CURRENT captured frame pixels, not world coordinates.
 ) {
     init {
         require(space.isNotBlank()) { "space must not be blank" }
@@ -40,6 +41,10 @@ data class BigMapGeometry(
         require(errorPx.isFinite() && errorPx >= 0.0) { "errorPx must be finite and >= 0: $errorPx" }
         require(support.isFinite() && support in 0.0..1.0) { "support must be in 0..1: $support" }
         require(version >= 1) { "version must be >= 1: $version" }
+        require(framePoints.size <= 96 && framePoints.size % 2 == 0 && framePoints.indices.all { i ->
+            val limit = if (i % 2 == 0) frameWidth else frameHeight
+            framePoints[i] >= 0.0 && framePoints[i] < limit
+        }) { "invalid frame points" }
 
         val det = matrix[0] * matrix[4] - matrix[1] * matrix[3]
         require(det.isFinite() && det > 0.0) { "matrix determinant must be positive: $det" }
@@ -98,17 +103,19 @@ data class DecodedBigMapGeometry(
 private data class NativeBigMapHeader(
     val mode: String = "rejected",
     val phase: String? = null,
-    val version: Int = 1 // Legacy JNI did not require an explicit version.
+    val version: Int = 1, // Legacy JNI did not require an explicit version.
+    val measuredMotion: Boolean = false
 )
 
 @Serializable
 private data class NativeBigMapGeometry(
     val space: String, val reference: String, val matrix: List<Double>,
     val frameWidth: Int, val frameHeight: Int, val timestampSeconds: Double,
-    val inliers: Int, val matches: Int, val errorPx: Double, val support: Double
+    val inliers: Int, val matches: Int, val errorPx: Double, val support: Double,
+    val framePoints: List<Double> = emptyList()
 ) {
     fun validated(version: Int) = BigMapGeometry(space, reference, matrix, frameWidth, frameHeight,
-        timestampSeconds, inliers, matches, errorPx, support, version)
+        timestampSeconds, inliers, matches, errorPx, support, version, if (version == 2) framePoints else emptyList())
 }
 
 object BigMapGeometryDecoder {
@@ -132,9 +139,10 @@ object BigMapGeometryDecoder {
                 "error" in root || "snapshot_revision" in root) return rejected(version)
 
             val phase = header.phase ?: if (version == 1) "absolute" else return rejected(version)
-            // V2 can echo the previous anchor as found/moving or found/confirming after a failed follow.
-            // Only tracking identifies a confirmed registration of this frame. V1 also had absolute fixes.
-            val confirmed = phase == "tracking" || (version == 1 && phase == "absolute")
+            // Older v2 producers could echo the previous matrix as moving/found. Only the
+            // explicit evidence from a complete, current-frame follow opts into moving geometry.
+            val confirmed = phase == "tracking" || (version == 2 && phase == "moving" && header.measuredMotion) ||
+                (version == 1 && phase == "absolute")
             if (header.mode != "found" || !confirmed) return DecodedBigMapGeometry(header.mode, null, phase, version)
 
             val body = if (version == 1) root else root["v2"] as? JsonObject ?: return rejected(version)

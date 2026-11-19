@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -172,6 +173,7 @@ private:
     std::vector<cv::Point2f> points_;
     cv::Mat descriptors_;
     cv::Ptr<cv::FlannBasedMatcher> global_matcher_;
+    mutable std::mutex matcher_mutex_; // FLANN's index is shared with the absolute refresh worker.
 };
 
 cv::Mat poseMatrix(const LayerReference& ref, const MinimapCrop& mm, const PositionFix& fix);

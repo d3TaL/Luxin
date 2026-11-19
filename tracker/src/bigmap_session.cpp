@@ -1,6 +1,7 @@
 #include "luxin/bigmap_session.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -38,6 +39,24 @@ double cornerDistance(const cv::Mat& a, const cv::Mat& b, cv::Size size) {
     return distance;
 }
 
+// Absolute maps K -> captured pixels. ORB motion maps small anchor pixels -> small current pixels.
+BigMapGeometry followed(const BigMapGeometry& absolute, const cv::Mat& transform, cv::Size small, double ts) {
+    const double sx = double(small.width) / absolute.frame_width, sy = double(small.height) / absolute.frame_height;
+    cv::Mat scale = (cv::Mat_<double>(3, 3) << sx, 0, 0, 0, sy, 0, 0, 0, 1);
+    cv::Mat inverse = (cv::Mat_<double>(3, 3) << 1 / sx, 0, 0, 0, 1 / sy, 0, 0, 0, 1);
+    cv::Mat motion = cv::Mat::eye(3, 3, CV_64F), anchor = cv::Mat::eye(3, 3, CV_64F);
+    transform.copyTo(motion(cv::Rect(0, 0, 3, 2)));
+    absolute.matrix.copyTo(anchor(cv::Rect(0, 0, 3, 2)));
+    cv::Mat composed = inverse * motion * scale * anchor;
+    const double a = (composed.at<double>(0, 0) + composed.at<double>(1, 1)) / 2;
+    const double b = (composed.at<double>(1, 0) - composed.at<double>(0, 1)) / 2;
+    BigMapGeometry result = absolute;
+    result.matrix = (cv::Mat_<double>(2, 3) << a, -b, composed.at<double>(0, 2), b, a, composed.at<double>(1, 2));
+    result.timestamp_seconds = ts;
+    if (!cv::checkRange(result.matrix) || !std::isfinite(a * a + b * b) || a * a + b * b <= 1e-16) return {};
+    return result;
+}
+
 bool controlsUnchanged(const cv::Mat& anchor, const cv::Mat& current, BigMapFollowStats& stats) {
     size_t index = 0;
     for (const auto& box : std::vector<cv::Rect>{{2790, 500, 170, 450}, {2020, 540, 120, 350}}) {
@@ -61,7 +80,8 @@ bool controlsUnchanged(const cv::Mat& anchor, const cv::Mat& current, BigMapFoll
 }
 
 bool follow(const cv::Mat& anchor, const std::vector<cv::KeyPoint>& anchor_points,
-    const cv::Mat& anchor_descriptors, const cv::Mat& current, cv::Mat& transform, BigMapFollowStats& stats) {
+    const cv::Mat& anchor_descriptors, const cv::Mat& current, cv::Mat& transform, BigMapFollowStats& stats,
+    bool debug_points = false) {
     const auto reject = [&stats](const char* reason) { stats.outcome = reason; return false; };
     stats.working_size = current.size();
     stats.anchor_keypoints = static_cast<int>(anchor_points.size());
@@ -153,6 +173,15 @@ bool follow(const cv::Mat& anchor, const std::vector<cv::KeyPoint>& anchor_point
     }
     if (!controlsUnchanged(anchor, current, stats)) return false;
     stats.outcome = "accepted";
+    if (debug_points) {
+        std::array<bool, 8 * 6> sampled{};
+        for (auto p : kept) {
+            const int x = int(p.x * 8 / current.cols), y = int(p.y * 6 / current.rows);
+            if (x < 0 || x >= 8 || y < 0 || y >= 6 || sampled[y * 8 + x]) continue;
+            sampled[y * 8 + x] = true;
+            stats.debug_points.push_back(p);
+        }
+    }
     return true;
 }
 } // namespace
@@ -198,6 +227,9 @@ int BigMapSession::snapshot_revision() const {
 }
 
 void BigMapSession::reset() {
+    renewal_valid_ = false; // Never wait on an in-flight search here; only the owner can adopt it.
+    confirmed_anchor_ = false;
+    last_refresh_ = -1;
     anchor_gray_.release();
     anchor_descriptors_.release();
     anchor_keypoints_.clear();
@@ -220,9 +252,91 @@ void BigMapSession::reset() {
     ++snapshot_revision_;
 }
 
+void BigMapSession::renew(const cv::Mat& frame, const cv::Mat& small,
+    const std::vector<std::shared_ptr<LayerReference>>& refs, BigMapSessionResult& result, bool debug_points) {
+    if (!refresh_search_) return;
+    const double now = previous_timestamp_;
+    // At most one speculative absolute search process-wide, even across rapid Stop/Start.
+    static std::atomic<bool> worker_busy{false};
+    if (renewal_.valid()) {
+        if (renewal_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+        Renewal candidate;
+        try { candidate = renewal_.get(); } catch (const std::exception&) { renewal_valid_ = false; }
+        const bool valid = renewal_valid_;
+        renewal_valid_ = false;
+        result.refresh = "discarded";
+        if (!valid) return;
+        const auto& g = candidate.absolute;
+        // This was a complete absolute search on a frame the old anchor also verified.
+        // A conflicting/ambiguous result is evidence against the old fix, not a fallback.
+        auto conflict = [&] {
+            reset();
+            result.geometry = {};
+            result.measured_motion = false;
+            result.follow.debug_points.clear();
+            result.phase = "acquiring";
+            result.refresh = "conflict";
+        };
+        if (g.mode != "found" || g.timestamp_seconds != candidate.expected.timestamp_seconds ||
+            !equivalentBigMapGeometry(candidate.expected, g)) { conflict(); return; }
+        if (candidate.gray.empty() || !renewal_can_adopt_ || result.phase != "tracking" || now <= g.timestamp_seconds ||
+            now - g.timestamp_seconds > 10.0) return;
+        BigMapFollowStats check;
+        cv::Mat step;
+        if (!follow(candidate.gray, candidate.points, candidate.descriptors, small, step, check, debug_points)) return;
+        auto fresh = followed(g, step, small.size(), now);
+        if (fresh.mode != "found" || !equivalentBigMapGeometry(result.geometry, fresh)) {
+            conflict();
+            return;
+        }
+        // Two independent absolute origins agreed on this fresh frame. Keep the NEW
+        // origin timestamp; it is neither the completion time nor the publication time.
+        anchor_ = geometry_anchor_ = g;
+        anchor_gray_ = std::move(candidate.gray);
+        anchor_keypoints_ = std::move(candidate.points);
+        anchor_descriptors_ = std::move(candidate.descriptors);
+        previous_transform_ = step;
+        result.geometry = std::move(fresh);
+        result.follow.debug_points = std::move(check.debug_points);
+        result.refresh = "adopted";
+        return;
+    }
+    // Budget for the observed 1.5–2.4 s SIFT and a fresh confirmation before the 10 s cutoff.
+    if (result.phase != "tracking" || result.anchor_age_seconds < 6.0 || result.anchor_age_seconds > 8.0 ||
+        (last_refresh_ >= 0 && now - last_refresh_ < 2.0)) return;
+    last_refresh_ = now;
+    try {
+        if (worker_busy.exchange(true)) return;
+        // RAII releases on completion, frame allocation failure or async launch failure.
+        auto release = [](std::atomic<bool>* busy) { busy->store(false); };
+        std::unique_ptr<std::atomic<bool>, decltype(release)> ticket(&worker_busy, release);
+        // One owned frame, one asynchronous job, no backlog. No worker access to this,
+        // the Java Bitmap, JNI handles or live session state. Future destruction joins.
+        renewal_ = std::async(std::launch::async, [search = refresh_search_, image = frame.clone(),
+            gray = small, refs, expected = result.geometry, ticket = std::move(ticket)]() mutable {
+            auto running = std::move(ticket); // release at function exit, even if future isn't collected yet
+            Renewal r;
+            r.expected = expected;
+            r.absolute = search(image, refs, expected.timestamp_seconds, nullptr);
+            if (r.absolute.mode == "found") {
+                // Even if preparing the next ORB anchor fails, return the absolute
+                // decision so the owner still sees contradictions on this lineage.
+                try {
+                    features(gray, r.points, r.descriptors);
+                    r.gray = gray;
+                } catch (const std::exception&) { r.gray.release(); }
+            }
+            return r;
+        });
+        renewal_valid_ = true;
+        renewal_can_adopt_ = true;
+        result.refresh = "started";
+    } catch (const std::exception&) { result.refresh = "discarded"; }
+}
+
 BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
     const std::vector<std::shared_ptr<LayerReference>>& refs, double timestamp,
-    BigMapSessionDiagnosticSink before_absolute, void* diagnostic_context) try {
+    BigMapSessionDiagnosticSink before_absolute, void* diagnostic_context, bool debug_points) try {
     BigMapSessionResult result;
     if (std::isfinite(timestamp)) {
         if (!anchor_gray_.empty()) result.anchor_age_seconds = timestamp - anchor_.timestamp_seconds;
@@ -252,7 +366,7 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
         const auto start = Clock::now();
         cv::Mat transform;
         const bool ok = follow(anchor_gray_, anchor_keypoints_, anchor_descriptors_,
-            current, transform, result.follow);
+            current, transform, result.follow, debug_points);
         result.follow_ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
         const bool movement_measured = result.follow.geometry_accepted && !previous_transform_.empty();
         const double movement = movement_measured ?
@@ -264,10 +378,7 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
             std::strcmp(result.follow.outcome, "controls_change") == 0;
 
         if (ok && !appearance_failure) {
-            // Clean follow against the absolute anchor: advance published geometry.
-            // Markers always move with the map: publish geometry even while moving
-            // (movement > 0.6). The phase label reflects motion, but geometry is
-            // always available for overlay rendering.
+            // Only a complete follow against the absolute anchor can measure current motion.
             previous_transform_ = transform.clone();
             stable_frames_ = movement <= 0.6 ? stable_frames_ + 1 : 0;
             result.movement_px = movement;
@@ -277,34 +388,32 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
             appearance_suspended_ = false;
             result.appearance_suspended = false;
             result.phase = stable_frames_ >= 2 ? "tracking" : movement <= 0.6 ? "confirming" : "moving";
-            // Compose published geometry: geometry_anchor_ (Kongying -> anchor frame) * motion (anchor -> current).
-            const double sx = double(current.cols) / frame.cols, sy = double(current.rows) / frame.rows;
-            cv::Mat scale = (cv::Mat_<double>(3, 3) << sx, 0, 0, 0, sy, 0, 0, 0, 1);
-            cv::Mat inverse = (cv::Mat_<double>(3, 3) << 1 / sx, 0, 0, 0, 1 / sy, 0, 0, 0, 1);
-            cv::Mat motion = cv::Mat::eye(3, 3, CV_64F), anchor = cv::Mat::eye(3, 3, CV_64F);
-            transform.copyTo(motion(cv::Rect(0, 0, 3, 2)));
-            geometry_anchor_.matrix.copyTo(anchor(cv::Rect(0, 0, 3, 2)));
-            cv::Mat composed = inverse * motion * scale * anchor;
-            const double a = (composed.at<double>(0, 0) + composed.at<double>(1, 1)) / 2;
-            const double b = (composed.at<double>(1, 0) - composed.at<double>(0, 1)) / 2;
-            result.geometry = geometry_anchor_;
-            result.geometry.matrix = (cv::Mat_<double>(2, 3) << a, -b, composed.at<double>(0, 2), b, a, composed.at<double>(1, 2));
-            result.geometry.timestamp_seconds = timestamp;
-            if (!cv::checkRange(result.geometry.matrix) || !std::isfinite(a * a + b * b) || a * a + b * b <= 1e-16) {
+            result.geometry = followed(geometry_anchor_, transform, current.size(), timestamp);
+            if (result.geometry.mode != "found") {
                 reset();
                 result.reset_reason = "composed_transform";
                 result.geometry = {};
                 result.phase = "rejected";
                 return result;
             }
+            if (result.phase == "tracking") {
+                confirmed_anchor_ = true;
+            } else {
+                renewal_can_adopt_ = false;
+                result.measured_motion = confirmed_anchor_ && result.phase == "moving";
+            }
+            // Movement disqualifies adoption, not contradictory absolute evidence about this anchor.
+            renew(frame, current, refs, result, debug_points);
             ++snapshot_revision_;
             return result;
         }
 
-        // Follow failed or appearance changed: keep publishing last known geometry so markers
-        // keep moving with the map. Do not destroy geometry_anchor_.
+        // A failed follow may retain its private anchor for retry, never current-frame geometry.
+        confirmed_anchor_ = false;
+        renewal_can_adopt_ = false;
         not_ok_counter_++;
         if (not_ok_counter_ >= MAX_NOT_OK) {
+            renewal_valid_ = false;
             // Discard anchor but preserve the SIFT cooldown and observation timestamp.
             // A full reset() would forget last_attempt_ and let SIFT re-run too soon.
             anchor_gray_.release();
@@ -327,16 +436,21 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
         result.appearance_suspended = true;
         result.suspended_still_frames = suspended_still_frames_;
         result.reset_reason = "follow_failed";
-        // Keep publishing last geometry so markers don't disappear during transient failure.
-        if (!geometry_anchor_.space.empty() && !geometry_anchor_.matrix.empty()) {
-            result.geometry = geometry_anchor_;
-            result.geometry.timestamp_seconds = timestamp;
-        }
         result.phase = movement > 0.6 ? "moving" : "confirming";
         return result;
     }
 
     // No valid anchor: expiry tracking.
+    renewal_valid_ = false;
+    confirmed_anchor_ = false;
+    if (renewal_.valid()) {
+        // Do not run a synchronous fallback SIFT alongside an obsolete refresh.
+        if (renewal_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            result.anchor_expired = !anchor_gray_.empty() && timestamp - anchor_.timestamp_seconds > 10.0;
+            return result;
+        }
+        try { renewal_.get(); } catch (const std::exception&) { /* normal reacquisition below */ }
+    }
     result.anchor_expired = !anchor_gray_.empty() && timestamp - anchor_.timestamp_seconds > 10.0;
 
     bool settled = false;

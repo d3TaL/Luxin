@@ -259,6 +259,7 @@ bool LayerReference::registerQuery(
         cv::BFMatcher local_matcher(cv::NORM_L2);
         local_matcher.knnMatch(query_descriptors, cand_descriptors, pairs, 2);
     } else if (global_matcher_) {
+        std::lock_guard<std::mutex> lock(matcher_mutex_);
         global_matcher_->knnMatch(query_descriptors, pairs, 2);
     } else {
         return false;

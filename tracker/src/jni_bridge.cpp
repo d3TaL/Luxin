@@ -31,7 +31,7 @@ struct NativeTrackerContext {
     std::mutex mutex;
     std::vector<std::shared_ptr<luxin::LayerReference>> models;
     std::unique_ptr<luxin::SplitTracker> tracker;
-    luxin::BigMapSession bigmap;
+    luxin::BigMapSession bigmap{luxin::registerBigMap};
     double unit_scale_override = 0.0;
     double unit_scale = 0.75;
     int frame_width = 0;
@@ -118,7 +118,7 @@ void logBigMapDiagnostics(const luxin::BigMapSessionResult& result,
         "reset=%s anchorExpired=%d anchorAgeS=%.3f gapS=%.3f sinceAttemptS=%.3f "
         "follow=%s sparseOk=%d suspended=%d suspendedStill=%d followMs=%.1f movementPx=%.3f stable=%d convertMs=%.1f "
         "features=%.1f match=%.1f validate=%.1f ms keypoints=%d sessionMs=%.1f "
-        "settle=%s settleMovementPx=%.3f settleStill=%d settleSpanS=%.3f settleMs=%.1f",
+        "settle=%s settleMovementPx=%.3f settleStill=%d settleSpanS=%.3f settleMs=%.1f refresh=%s measuredMotion=%d",
         stage, context.timestamp, context.width, context.height, result.phase.c_str(),
         result.geometry.mode.c_str(), result.absolute_attempted, result.absolute_throttled,
         result.reset_reason, result.anchor_expired, result.anchor_age_seconds,
@@ -128,7 +128,8 @@ void logBigMapDiagnostics(const luxin::BigMapSessionResult& result,
         result.registration.features_ms, result.registration.matching_ms,
         result.registration.validation_ms, result.registration.query_features, session_ms,
         result.acquisition_follow.outcome, result.acquisition_movement_px,
-        result.acquisition_still_frames, result.acquisition_still_seconds, result.acquisition_follow_ms);
+        result.acquisition_still_frames, result.acquisition_still_seconds, result.acquisition_follow_ms,
+        result.refresh, result.measured_motion);
     if (f.current_keypoints < 0) return; // follow was not attempted
     LOGI("BigMapFollow stage=%s ts=%.9f outcome=%s work=%dx%d kp=%d/%d desc=%d/%d "
         "matches=%d inliers=%d ratio=%.5f grid=%d errorPx=%.4f scale=%.5f angleDeg=%.4f "
@@ -158,7 +159,7 @@ extern "C" {
 
 JNIEXPORT jstring JNICALL
 Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeRegisterBigMapV2(
-    JNIEnv* env, jobject, jlong handle, jobject bitmap, jdouble timestamp
+    JNIEnv* env, jobject, jlong handle, jobject bitmap, jdouble timestamp, jboolean debug_points
 ) {
     auto* ctx = reinterpret_cast<NativeTrackerContext*>(handle);
     if (!ctx) {
@@ -181,7 +182,7 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeRegisterBigMapV2(
         }
         BigMapLogContext diagnostics{timestamp, bgr.cols, bgr.rows, diagnosticMs(conversion_start)};
         const auto session_start = DiagnosticClock::now();
-        const auto result = ctx->bigmap.update(bgr, ctx->models, timestamp, logBeforeBigMapAbsolute, &diagnostics);
+        const auto result = ctx->bigmap.update(bgr, ctx->models, timestamp, logBeforeBigMapAbsolute, &diagnostics, debug_points);
         const double session_ms = diagnosticMs(session_start);
         const auto& g = result.geometry;
         logBigMapDiagnostics(result, diagnostics, "return", session_ms);
@@ -189,7 +190,7 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeRegisterBigMapV2(
         out.imbue(std::locale::classic());
         out << std::setprecision(17) << "{\"mode\":" << jsonString(g.mode)
             << ",\"phase\":" << jsonString(result.phase)
-            << ",\"version\":2";
+            << ",\"version\":2,\"measuredMotion\":" << (result.measured_motion ? "true" : "false");
         if (g.mode == "found") {
             out << ",\"v2\":{"
                 << "\"space\":" << jsonString(g.space)
@@ -207,6 +208,17 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeRegisterBigMapV2(
                 out << g.matrix.at<double>(i / 3, i % 3);
             }
             out << ']';
+            if (debug_points && (result.phase == "tracking" || result.measured_motion) && !result.follow.debug_points.empty()) {
+                out << ",\"framePoints\":[";
+                bool first = true;
+                for (const auto p : result.follow.debug_points) {
+                    if (!first) out << ',';
+                    first = false;
+                    out << p.x * double(g.frame_width) / result.follow.working_size.width << ','
+                        << p.y * double(g.frame_height) / result.follow.working_size.height;
+                }
+                out << ']';
+            }
             out << "}";
         }
         out << '}';

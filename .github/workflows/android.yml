@@ -17,6 +17,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  bigmap-native:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libopencv-dev
+      - run: cmake -S tracker -B tracker/build-debug -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake --build tracker/build-debug --target test_bigmap_session test_bigmap_geometry -j2
+      - run: ctest --test-dir tracker/build-debug --output-on-failure -R '^(test_bigmap_session|test_bigmap_geometry)$'
+
   build:
     name: Build Debug APK (with Android NDK & OpenCV 4.10)
     runs-on: ubuntu-latest

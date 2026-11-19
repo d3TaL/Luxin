@@ -22,6 +22,9 @@ struct BigMapGeometry {
 // Conservative union of plain/layer/panel UI masks, scaled from the research frame.
 cv::Mat bigMapGeometryMask(cv::Size size);
 
+// Both transforms map Kongying units to captured pixels. Compare over the entire frame.
+bool equivalentBigMapGeometry(const BigMapGeometry& a, const BigMapGeometry& b);
+
 // Shared quality gate, exposed for deterministic boundary regressions without private images.
 bool bigMapGeometryQualityAccepted(int inliers, int matches, double error_px,
                                    double hull_area, int visible_pixels, cv::Size frame_size);
