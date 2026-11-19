@@ -68,6 +68,8 @@ class BigMapMarkerOverlay(context: Context) : View(context) {
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val geom = geometry ?: return
+        // A redraw can observe resized canvas bounds before capture publishes its invalidation.
+        if (!geom.fitsDisplay(canvas.width, canvas.height)) return
 
         for (markerWithLayer in markers) {
             val (dx, dy) = geom.toDisplay(markerWithLayer.record.x, markerWithLayer.record.y, canvas.width, canvas.height)

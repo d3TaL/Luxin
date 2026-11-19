@@ -35,7 +35,9 @@ import io.github.d3tal.luxin.tracker.BigMapGeometryDecoder
 import io.github.d3tal.luxin.tracker.BigMapLayerDetector
 import io.github.d3tal.luxin.tracker.BigMapMarkerFilter
 import io.github.d3tal.luxin.tracker.LayerDecision
-import io.github.d3tal.luxin.tracker.bigMapFrameIsCurrent
+import io.github.d3tal.luxin.tracker.BigMapFrame
+import io.github.d3tal.luxin.tracker.Publication
+import io.github.d3tal.luxin.tracker.publishTrackingResult
 import io.github.d3tal.luxin.tracker.bigMapGeometryRemainingMs
 import io.github.d3tal.luxin.tracker.LiveTrackingCadence
 import io.github.d3tal.luxin.tracker.LiveProcessingRate
@@ -536,7 +538,10 @@ class CaptureService : Service() {
                             lastGeneration = frame.generation
                         }
                         val gateStart = SystemClock.elapsedRealtime()
-                        val screenMode = bigMap.observe(engine.isBigMap(bitmap))
+                        val screenMode = bigMap.observeLive(engine.isBigMap(bitmap)) {
+                            publishLive(epoch, LiveTrackingState(enabled = true, status = "searching",
+                                message = "Большая карта закрыта; проверяю миникарту", packTitle = pack.manifest.title))
+                        }
                         val gateMs = SystemClock.elapsedRealtime() - gateStart
                         lastScreenMode = screenMode
                         if (screenMode == "unknown") {
@@ -573,7 +578,8 @@ class CaptureService : Service() {
                                 Log.d(TAG, "BigMap stage=begin $diagnosticKey inputAgeMs=${ageNs / 1_000_000} " +
                                     "readMs=$readMs bitmapMs=$bitmapMs gateMs=$gateMs")
                                 val start = SystemClock.elapsedRealtime()
-                                val decoded = BigMapGeometryDecoder.decodeStrictV1(engine.registerBigMapV2Json(
+                                val observed = BigMapFrame(frameRevision, frame.generation, frame.timestampNs, frame.width, frame.height)
+                                val decoded = BigMapGeometryDecoder.decodeLiveV2(engine.registerBigMapV2Json(
                                     bitmap, frame.timestampNs / 1_000_000_000.0))
                                 // A return log is NOT publication: cancellation/freshness gates below are unchanged.
                                 Log.d(TAG, "BigMapV2 stage=native_return $diagnosticKey phase=${decoded.phase} mode=${decoded.mode} version=${decoded.version} " +
@@ -582,12 +588,6 @@ class CaptureService : Service() {
                                 // Late native result after cancellation/pause must not be published.
                                 // ensureActive() above throws CancellationException if the coroutine
                                 // was cancelled, preventing publication of stale results.
-                                decoded.geometry?.let {
-                                    check(it.frameWidth == frame.width && it.frameHeight == frame.height &&
-                                        kotlin.math.abs(it.timestampSeconds - frame.timestampNs / 1_000_000_000.0) < 1e-6) {
-                                        "Геометрия не соответствует захваченному кадру"
-                                    }
-                                }
                                 val currentAge = System.nanoTime() - frame.timestampNs
                                 Log.d(TAG, "BigMapV2 stage=checked $diagnosticKey phase=${decoded.phase} mode=${decoded.mode} version=${decoded.version} " +
                                     "nativeMs=${SystemClock.elapsedRealtime() - start} ageMs=${currentAge / 1_000_000} " +
@@ -602,7 +602,7 @@ class CaptureService : Service() {
                                     Log.d(TAG, "BigMapV2 layer=$layerDecision mode=$screenMode phase=${decoded.phase} version=${decoded.version}")
                                     publishLive(epoch, LiveTrackingState(enabled = true, status = "paused",
                                         message = when {
-                                            decoded.geometry != null -> "Большая карта подтверждена (этаж=${layerDecision.layerId ?: "поверхность"})"
+                                            decoded.geometry != null -> "Привязка большой карты подтверждена"
                                             decoded.phase == "confirming" -> "Привязка-кандидат; проверяю свежий кадр"
                                             decoded.phase == "moving" -> "Карта движется; геометрия скрыта"
                                             decoded.phase == "acquiring" -> "Ожидаю повторной привязки"
@@ -614,8 +614,7 @@ class CaptureService : Service() {
                                         inliers = decoded.geometry?.inliers ?: 0,
                                         nativeMs = SystemClock.elapsedRealtime() - start, frameAgeMs = currentAge / 1_000_000,
                                         actualFps = bigMapFps),
-                                        expectedGeneration = frame.generation, timestampNs = frame.timestampNs,
-                                        expectedRevision = frameRevision)
+                                        frame = observed)
                                 }
                             }
                             delay(LiveTrackingCadence.delayMs(screenMode, SystemClock.elapsedRealtime() - loopStart))
@@ -688,20 +687,22 @@ class CaptureService : Service() {
         }
     }
 
-    private suspend fun publishLive(epoch: Long, state: LiveTrackingState,
-                                   expectedGeneration: Long? = null, timestampNs: Long? = null,
-                                   expectedRevision: Long? = null) = withContext(Dispatchers.Main.immediate) {
-        if (trackingEpoch == epoch) {
+    private suspend fun publishLive(epoch: Long, state: LiveTrackingState, frame: BigMapFrame? = null) =
+        withContext(Dispatchers.Main.immediate) {
+            val blockedMessage = when {
+                !state.enabled || state.status == "loading" -> null
+                !capturedContentVisible -> "Захватываемое приложение не видно"
+                snapshotBusy.get() -> "Пауза: ручной снимок"
+                else -> null
+            }
+            val outcome = publishTrackingResult(state, epoch, trackingEpoch, frame, trackingRevision,
+                synchronized(imageLock) { generation }, System.nanoTime(), blockedMessage, LiveTrackingStatus::publish)
+            if (outcome == Publication.DROPPED) {
+                if (frame != null) Log.d(TAG, "BigMap stage=publish_dropped reason=epoch expected=$epoch current=$trackingEpoch " +
+                    "tsNs=${frame.timestampNs} gen=${frame.generation} rev=${frame.revision}")
+                return@withContext
+            }
             geometryExpiryJob?.cancel()
-            val blocked = state.enabled && state.status != "loading" && (!capturedContentVisible || snapshotBusy.get())
-            val obsolete = expectedGeneration != null && (timestampNs == null || expectedRevision == null ||
-                !bigMapFrameIsCurrent(expectedRevision, trackingRevision, expectedGeneration,
-                    synchronized(imageLock) { generation }, timestampNs, System.nanoTime()))
-            LiveTrackingStatus.publish(if (obsolete) LiveTrackingState(enabled = true, status = "paused",
-                message = "Привязка устарела; ожидаю обновление", packTitle = state.packTitle)
-            else if (blocked) LiveTrackingState(enabled = true, status = "paused",
-                message = if (!capturedContentVisible) "Захватываемое приложение не видно" else "Пауза: ручной снимок",
-                packTitle = state.packTitle) else state)
             val published = LiveTrackingStatus.state.value
             val geometry = published.bigMapGeometry
             if (geometry != null) {
@@ -715,16 +716,12 @@ class CaptureService : Service() {
                     }
                 }
             }
-            if (expectedGeneration != null) {
-                Log.d(TAG, "BigMap stage=publish epoch=$epoch tsNs=$timestampNs gen=$expectedGeneration " +
-                    "rev=$expectedRevision obsolete=$obsolete blocked=$blocked phase=${state.bigMapGeometryMode} " +
+            if (frame != null) {
+                Log.d(TAG, "BigMap stage=publish epoch=$epoch tsNs=${frame.timestampNs} gen=${frame.generation} " +
+                    "rev=${frame.revision} obsolete=${outcome == Publication.OBSOLETE} blocked=${blockedMessage != null} phase=${state.bigMapGeometryMode} " +
                     "geometry=${published.bigMapGeometry != null}")
             }
-        } else if (expectedGeneration != null) {
-            Log.d(TAG, "BigMap stage=publish_dropped reason=epoch expected=$epoch current=$trackingEpoch " +
-                "tsNs=$timestampNs gen=$expectedGeneration rev=$expectedRevision")
         }
-    }
 
     private fun stopLiveTracking() {
         trackingEpoch++

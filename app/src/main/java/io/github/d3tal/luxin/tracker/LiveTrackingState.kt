@@ -42,7 +42,38 @@ data class LiveTrackingState(
     val bigMapGeometry: BigMapGeometry? = null,
     val bigMapGeometryMode: String = "unknown",
     val bigMapLayerDecision: LayerDecision? = null
-)
+) {
+    internal val markerLayer: LayerDecision?
+        get() = bigMapLayerDecision?.takeIf { it.confirmed && screenMode == "big_map" &&
+            bigMapGeometryMode == "tracking" && bigMapGeometry != null &&
+            ((it.mode == "surface" && it.isSurface && it.layerId == null) ||
+                (it.mode == "layer" && !it.isSurface && !it.layerId.isNullOrBlank())) }
+}
+
+/** Captured before JNI; never reconstructed from the service's current state after native returns. */
+internal data class BigMapFrame(val revision: Long, val generation: Long, val timestampNs: Long,
+                                val width: Int, val height: Int)
+
+internal enum class Publication { CURRENT, OBSOLETE, BLOCKED, DROPPED }
+
+/** Called on Main: check the observation and commit to the HUD in the same turn. */
+internal fun publishTrackingResult(state: LiveTrackingState, epoch: Long, currentEpoch: Long,
+                                   frame: BigMapFrame?, revision: Long, generation: Long, nowNs: Long,
+                                   blockedMessage: String?, publish: (LiveTrackingState) -> Unit): Publication {
+    if (epoch != currentEpoch) return Publication.DROPPED
+    val geometry = state.bigMapGeometry
+    val obsolete = (frame != null && !bigMapFrameIsCurrent(frame.revision, revision, frame.generation,
+        generation, frame.timestampNs, nowNs)) || (geometry != null && (frame == null ||
+        geometry.frameWidth != frame.width || geometry.frameHeight != frame.height ||
+        kotlin.math.abs(geometry.timestampSeconds - frame.timestampNs / 1_000_000_000.0) >= 1e-6))
+    val reason = if (obsolete) "Привязка устарела; ожидаю обновление" else blockedMessage
+    if (reason != null) {
+        publish(LiveTrackingState(enabled = true, status = "paused", message = reason, packTitle = state.packTitle))
+        return if (obsolete) Publication.OBSOLETE else Publication.BLOCKED
+    }
+    publish(state)
+    return Publication.CURRENT
+}
 
 fun formatTrackingHud(s: LiveTrackingState): String = buildString {
     append(s.message)

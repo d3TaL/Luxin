@@ -115,6 +115,16 @@ class BigMapMarkerFilterTest {
     }
 
     @Test
+    fun `bad imported coordinates do not hide valid markers or throw`() {
+        KongyingMarkerStore.replaceAll(listOf(marker(1, x = Double.NaN),
+            marker(2, x = Double.MAX_VALUE), marker(3, x = 10.0)))
+        val g = BigMapGeometry("twt702", "ref", listOf(2.0, 0.0, 0.0, 0.0, 2.0, 0.0),
+            3120, 1440, 0.0, 12, 12, 0.5, 0.5)
+        val visible = BigMapMarkerFilter.filterMarkersForBigMap("twt702", layerDecision(), 3120, 1440, g)
+        assertEquals(listOf(3L), visible.map { it.record.id })
+    }
+
+    @Test
     fun `null space or geometry returns empty`() {
         KongyingMarkerStore.replaceAll(listOf(marker(1, "twt702")))
 

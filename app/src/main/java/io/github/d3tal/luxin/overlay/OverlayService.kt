@@ -8,11 +8,12 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.Typeface
+import android.hardware.input.InputManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
-import android.util.DisplayMetrics
+import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -22,13 +23,8 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import io.github.d3tal.luxin.capture.CaptureService
-import io.github.d3tal.luxin.tracker.BigMapGeometry
-import io.github.d3tal.luxin.tracker.BigMapGeometryDecoder
-import io.github.d3tal.luxin.tracker.BigMapLayerDetector
 import io.github.d3tal.luxin.tracker.BigMapMarkerFilter
 import io.github.d3tal.luxin.tracker.BigMapMarkerOverlay
-import io.github.d3tal.luxin.tracker.LayerDecision
-import io.github.d3tal.luxin.tracker.LiveTrackingState
 import io.github.d3tal.luxin.tracker.LiveTrackingStatus
 import io.github.d3tal.luxin.tracker.formatTrackingHud
 import kotlinx.coroutines.CoroutineScope
@@ -42,6 +38,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.ceil
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 class OverlayService : Service() {
 
@@ -127,6 +124,11 @@ class OverlayService : Service() {
         windowManager = wm
 
         val bounds = wm.maximumWindowMetrics.bounds
+        fun dp(value: Int) = (value * resources.displayMetrics.density).roundToInt()
+        // InputDispatcher combines both non-touchable windows as 1 - (1 - alpha)^2.
+        // Reserve a little headroom for rounding on devices with a lower limit.
+        val opacityLimit = requireNotNull(getSystemService(InputManager::class.java)).maximumObscuringOpacityForTouch
+        val passiveAlpha = minOf(0.5f, 1f - sqrt(1f - 0.99f * opacityLimit.coerceIn(0f, 1f)))
         shortSide = minOf(bounds.width(), bounds.height())
         calibration = MinimapCalibrationStore.load(this, shortSide).constrained(bounds.width(), bounds.height())
 
@@ -144,9 +146,7 @@ class OverlayService : Service() {
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
-            // Android 12+ untouchable application overlays require alpha <= 0.8f.
-            // Use 0.5f so InputDispatcher does not drop game touch events through the overlay.
-            alpha = 0.5f
+            alpha = passiveAlpha
         }
         markerParams = params
         applyCalibrationToParams(params)
@@ -196,9 +196,9 @@ class OverlayService : Service() {
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
-            alpha = 0.5f
+            alpha = passiveAlpha
         }
-        bigMapMarkerOverlay = BigMapMarkerOverlay(this)
+        bigMapMarkerOverlay = BigMapMarkerOverlay(this).apply { visibility = View.INVISIBLE }
         bigMapMarkerOverlay?.setDisplayMetrics(resources.displayMetrics)
         bigMapMarkerOverlayView = bigMapMarkerOverlay
         bigMapMarkerOverlayParams = bigMapParams
@@ -208,7 +208,7 @@ class OverlayService : Service() {
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.END
@@ -288,7 +288,7 @@ class OverlayService : Service() {
             addView(hudButton("Сброс калибровки") { resetCalibration() })
         }
 
-        var isCollapsed = false
+        var isCollapsed = true
 
         val headerRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -300,13 +300,15 @@ class OverlayService : Service() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             setTypeface(null, Typeface.BOLD)
             setPadding(4, 4, 8, 4)
-            visibility = View.GONE
+            setSingleLine()
+            maxWidth = dp(96)
+            ellipsize = TextUtils.TruncateAt.END
             text = "Luxin HUD"
         }
 
-        val toggleCollapseButton = hudButton("▾ Свернуть") { }
+        val toggleCollapseButton = hudButton("▸ HUD") { }
 
-        headerRow.addView(collapsedSummaryText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        headerRow.addView(collapsedSummaryText, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         headerRow.addView(toggleCollapseButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
         val controlsContainer = LinearLayout(this).apply {
@@ -323,39 +325,40 @@ class OverlayService : Service() {
             addView(cleanSnapButton)
         }
 
+        // Only the opened controls scroll; the collapse button stays reachable.
+        val controlsScroll = ScrollView(this).apply {
+            addView(controlsContainer)
+            visibility = View.GONE
+        }
         toggleCollapseButton.setOnClickListener {
             isCollapsed = !isCollapsed
-            if (isCollapsed) {
-                controlsContainer.visibility = View.GONE
-                collapsedSummaryText.visibility = View.VISIBLE
-                toggleCollapseButton.text = "▸ Развернуть"
-            } else {
-                controlsContainer.visibility = View.VISIBLE
-                collapsedSummaryText.visibility = View.GONE
-                toggleCollapseButton.text = "▾ Свернуть"
-            }
+            controlsScroll.visibility = if (isCollapsed) View.GONE else View.VISIBLE
+            collapsedSummaryText.visibility = if (isCollapsed) View.VISIBLE else View.GONE
+            toggleCollapseButton.text = if (isCollapsed) "▸ HUD" else "▾ Свернуть"
         }
-
-        val hud = LinearLayout(this).apply {
+        val hud = object : LinearLayout(this) {
+            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                val displayHeight = wm.currentWindowMetrics.bounds.height()
+                val heightCap = minOf(displayHeight / 2, dp(320))
+                fun atMost(spec: Int, cap: Int): Int {
+                    val limit = if (MeasureSpec.getMode(spec) == MeasureSpec.UNSPECIFIED) cap else minOf(MeasureSpec.getSize(spec), cap)
+                    return MeasureSpec.makeMeasureSpec(limit, MeasureSpec.AT_MOST)
+                }
+                super.onMeasure(atMost(widthMeasureSpec, dp(280)), atMost(heightMeasureSpec, heightCap))
+            }
+        }.apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.argb(210, 24, 24, 28))
-            setPadding(14, 10, 14, 10)
-            addView(headerRow)
-            addView(controlsContainer)
+            setPadding(dp(4), 0, dp(4), 0)
+            addView(headerRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+            addView(controlsScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         }
-        val scroll = object : ScrollView(this) {
-            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-                val limit = (wm.maximumWindowMetrics.bounds.height() - 200).coerceAtLeast(200)
-                val available = MeasureSpec.getSize(heightMeasureSpec).takeIf { it > 0 } ?: limit
-                super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(minOf(limit, available), MeasureSpec.AT_MOST))
-            }
-        }.apply { addView(hud) }
-        controlHudView = scroll
+        controlHudView = hud
 
         try {
             wm.addView(marker, params)
-            wm.addView(scroll, hudParams)
             wm.addView(bigMapMarkerOverlayView, bigMapMarkerOverlayParams)
+            wm.addView(hud, hudParams)
             _isShowing.value = true
 
             scope.launch {
@@ -398,15 +401,11 @@ class OverlayService : Service() {
                 }
             }
 
-            // Big-map marker overlay: collect filtered markers and repaint on geometry change.
-            // Markers always move with the map: show in tracking/moving/confirming phases
-            // whenever we have a valid geometry (last known matrix).
+            // HUD geometry alone does not authorize choosing a floor for item markers.
             scope.launch {
                 LiveTrackingStatus.state.collect { s ->
-                    if (s.screenMode == "big_map" && s.bigMapGeometry != null &&
-                        (s.bigMapGeometryMode == "tracking" || s.bigMapGeometryMode == "moving" || s.bigMapGeometryMode == "confirming")) {
-                        val layerDecision = s.bigMapLayerDecision
-                            ?: LayerDecision(null, false, "unknown", "no layer detection")
+                    val layerDecision = s.markerLayer
+                    if (s.bigMapGeometry != null && layerDecision != null) {
                         val filtered = BigMapMarkerFilter.filterMarkersForBigMap(
                             s.bigMapGeometry.space,
                             layerDecision,
@@ -415,7 +414,9 @@ class OverlayService : Service() {
                             s.bigMapGeometry
                         )
                         bigMapMarkerOverlay?.setMarkers(filtered, s.bigMapGeometry)
+                        bigMapMarkerOverlay?.visibility = if (filtered.isEmpty()) View.INVISIBLE else View.VISIBLE
                     } else {
+                        bigMapMarkerOverlay?.visibility = View.INVISIBLE
                         bigMapMarkerOverlay?.clear()
                     }
                 }

@@ -79,7 +79,11 @@ object BigMapMarkerFilter {
             BigMapMarkerWithLayer(marker, isSelected)
         }.filter { marker ->
             // 5. Маркер должен попадать в видимую область кадра (отбрасываем за кадром).
-            val (px, py) = geometry.project(marker.record.x, marker.record.y)
+            val (px, py) = try {
+                geometry.project(marker.record.x, marker.record.y)
+            } catch (_: IllegalArgumentException) {
+                return@filter false // An invalid imported point must not abort the entire HUD update.
+            }
             px >= 0.0 && px < frameWidth && py >= 0.0 && py < frameHeight
         }
     }

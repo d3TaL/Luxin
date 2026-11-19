@@ -85,22 +85,42 @@ class LiveTrackingStateTest {
     }
 
     @Test fun lateNativeGeometryRemainsInvalidAfterBriefPauseAndResume() {
-        val startedRevision = 7L
-        val generation = 2L
-        val frameNs = 10_000_000_000L
-        // Visibility returns before native completion, with a still-young frame.
-        // Decode succeeds, but that must never substitute for the publication guard.
-        val resumedRevision = startedRevision + 1
-        val decoded = BigMapGeometryDecoder.decode("""{"mode":"found","phase":"tracking",
+        val old = BigMapFrame(7, 2, 10_000_000_000L, 1560, 720)
+        val raw = """{"mode":"found","phase":"tracking","version":2,"v2":{
             "space":"twt702","reference":"test","matrix":[1.0,0.0,0.0,0.0,1.0,0.0],
             "frameWidth":1560,"frameHeight":720,"timestampSeconds":10.0,
-            "inliers":24,"matches":30,"errorPx":0.5,"support":0.4}""")
-        assertNotNull(decoded.geometry)
-        assertFalse(bigMapFrameIsCurrent(startedRevision, resumedRevision, generation, generation,
-            frameNs, frameNs + 200_000_000))
-        // Only work started in the resumed revision is eligible again.
-        assertTrue(bigMapFrameIsCurrent(resumedRevision, resumedRevision, generation, generation,
-            frameNs + 250_000_000, frameNs + 300_000_000))
+            "inliers":24,"matches":30,"errorPx":0.5,"support":0.4}}"""
+        var epoch = 3L
+        var revision = old.revision
+        val updates = mutableListOf<LiveTrackingState>()
+        fun start(frame: BigMapFrame, response: String): () -> Publication {
+            val startedEpoch = epoch
+            return { // Deliver JNI only when the test releases this pending callback.
+                val result = BigMapGeometryDecoder.decodeLiveV2(response)
+                val state = LiveTrackingState(enabled = true, screenMode = "big_map", bigMapGeometryMode = result.phase,
+                    bigMapGeometry = requireNotNull(result.geometry))
+                publishTrackingResult(state, startedEpoch, epoch, frame, revision, old.generation,
+                    10_300_000_000L, blockedMessage = null) { updates.add(it) }
+            }
+        }
+        val beforePause = start(old, raw)
+        revision++ // hidden, then visible again before native returns; generation unchanged
+        assertEquals(Publication.OBSOLETE, beforePause())
+        assertNull(updates.single().bigMapGeometry)
+
+        val fresh = old.copy(revision = revision, timestampNs = 10_250_000_000L)
+        val freshResponse = raw.replace("\"timestampSeconds\":10.0", "\"timestampSeconds\":10.25")
+        assertEquals(Publication.OBSOLETE, start(fresh, raw)()) // payload belongs to the older frame
+        assertNull(updates.last().bigMapGeometry)
+        val beforeStop = start(fresh, freshResponse)
+        epoch++ // Stop
+        epoch++ // Start, still using the same capture generation
+        val countAfterRestart = updates.size
+        assertEquals(Publication.DROPPED, beforeStop())
+        assertEquals(countAfterRestart, updates.size)
+        assertEquals(Publication.CURRENT, start(fresh, freshResponse)())
+        assertTrue(formatTrackingHud(updates.last()).contains("Геометрия: tracking"))
+        assertNotNull(updates.last().bigMapGeometry)
     }
 
     @Test fun lateFrameFromStoppedCaptureCannotPassRestartedGeneration() {

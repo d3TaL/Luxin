@@ -13,7 +13,9 @@ data class LayerDecision(
     val layerId: String?,
     val isSurface: Boolean,
     val mode: String, // "surface" | "layer" | "unknown"
-    val reason: String?
+    val reason: String?,
+    // Brightness clusters alone do not identify a Kongying floor (including surface).
+    val confirmed: Boolean = false
 )
 
 private const val LAYER_COLUMN_X_FRACTION_MIN = 0.88

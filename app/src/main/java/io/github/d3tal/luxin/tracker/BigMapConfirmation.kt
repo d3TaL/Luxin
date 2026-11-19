@@ -15,5 +15,13 @@ class BigMapConfirmation {
         }
     }
 
+    /** Finish withdrawing the map HUD before the caller can enter blocking minimap JNI. */
+    internal suspend fun observeLive(detected: Boolean, onMapClosed: suspend () -> Unit): String {
+        val hadMap = hits == 2
+        val mode = observe(detected)
+        if (hadMap && !detected) onMapClosed()
+        return mode
+    }
+
     fun reset() { hits = 0 }
 }

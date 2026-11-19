@@ -68,6 +68,14 @@ class BigMapMarkerOverlayTest {
     }
 
     @Test
+    fun `old geometry is not drawable on a resized canvas`() {
+        val geom = geometry()
+        assertTrue(geom.fitsDisplay(1560, 720))
+        assertFalse(geom.fitsDisplay(1440, 3120))
+        assertFalse(geom.fitsDisplay(3120, 0))
+    }
+
+    @Test
     fun `BigMapMarkerFilter marks selected layer blue, others gray`() {
         io.github.d3tal.luxin.data.KongyingMarkerStore.replaceAll(
             listOf(
