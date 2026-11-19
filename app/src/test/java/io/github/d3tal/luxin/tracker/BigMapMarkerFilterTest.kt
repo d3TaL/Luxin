@@ -52,7 +52,7 @@ class BigMapMarkerFilterTest {
     }
 
     @Test
-    fun `unknown layer excludes all markers`() {
+    fun `unknown layer shows all markers, none selected`() {
         KongyingMarkerStore.replaceAll(listOf(marker(1, "twt702")))
 
         val result = BigMapMarkerFilter.filterMarkersForBigMap(
@@ -60,11 +60,12 @@ class BigMapMarkerFilterTest {
             BigMapGeometry("twt702", "ref", listOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0), 3120, 1440, 0.0, 12, 12, 0.5, 0.5)
         )
 
-        assertEquals(0, result.size)
+        assertEquals(1, result.size)
+        assertFalse(result[0].isSelectedLayer)
     }
 
     @Test
-    fun `surface layer excludes underground markers`() {
+    fun `surface layer shows all markers, surface ones selected`() {
         KongyingMarkerStore.replaceAll(listOf(
             marker(1, "twt702", isUnderground = true, levels = listOf("SNOWMELT_DRAINAGE_CHANNEL_UG1")),
             marker(2, "twt702"), // empty levels = surface
@@ -75,8 +76,9 @@ class BigMapMarkerFilterTest {
             BigMapGeometry("twt702", "ref", listOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0), 3120, 1440, 0.0, 12, 12, 0.5, 0.5)
         )
 
-        assertEquals(1, result.size)
-        assertEquals(2L, result[0].record.id)
+        assertEquals(2, result.size)
+        assertFalse(result[0].isSelectedLayer)   // marker 1: underground
+        assertTrue(result[1].isSelectedLayer)    // marker 2: surface
     }
 
     @Test
@@ -91,8 +93,9 @@ class BigMapMarkerFilterTest {
             BigMapGeometry("twt702", "ref", listOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0), 3120, 1440, 0.0, 12, 12, 0.5, 0.5)
         )
 
-        assertEquals(1, result.size)
-        assertEquals(1L, result[0].record.id)
+        assertEquals(2, result.size)
+        assertTrue(result[0].isSelectedLayer)   // marker 1: UG1 matches
+        assertFalse(result[1].isSelectedLayer)  // marker 2: OTHER_LEVEL doesn't match
     }
 
     @Test
