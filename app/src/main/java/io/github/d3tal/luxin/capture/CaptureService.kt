@@ -570,12 +570,19 @@ class CaptureService : Service() {
                                 Log.d(TAG, "BigMap stage=begin $diagnosticKey inputAgeMs=${ageNs / 1_000_000} " +
                                     "readMs=$readMs bitmapMs=$bitmapMs gateMs=$gateMs")
                                 val start = SystemClock.elapsedRealtime()
-                                val decoded = BigMapGeometryDecoder.decode(engine.registerBigMapJson(
+                                val decoded = BigMapGeometryDecoder.decodeStrictV1(engine.registerBigMapV2Json(
                                     bitmap, frame.timestampNs / 1_000_000_000.0))
                                 // A return log is NOT publication: cancellation/freshness gates below are unchanged.
-                                Log.d(TAG, "BigMap stage=native_return $diagnosticKey phase=${decoded.phase} mode=${decoded.mode} " +
+                                Log.d(TAG, "BigMapV2 stage=native_return $diagnosticKey phase=${decoded.phase} mode=${decoded.mode} version=${decoded.version} " +
                                     "callDecodeMs=${SystemClock.elapsedRealtime() - start}")
                                 ensureActive()
+                                // Late native result after cancellation/pause must not be published.
+                                if (!ensureActive()) {
+                                    Log.d(TAG, "BigMapV2 stage=drop epoch=$epoch reason=cancelled-after-native")
+                                    waiting("Привязка устарела; ожидаю обновление", frame.width, frame.height,
+                                        screenMode = "big_map", reason = "cancelled-after-native")
+                                    continue
+                                }
                                 decoded.geometry?.let {
                                     check(it.frameWidth == frame.width && it.frameHeight == frame.height &&
                                         kotlin.math.abs(it.timestampSeconds - frame.timestampNs / 1_000_000_000.0) < 1e-6) {
@@ -583,7 +590,7 @@ class CaptureService : Service() {
                                     }
                                 }
                                 val currentAge = System.nanoTime() - frame.timestampNs
-                                Log.d(TAG, "BigMap stage=checked $diagnosticKey phase=${decoded.phase} mode=${decoded.mode} " +
+                                Log.d(TAG, "BigMapV2 stage=checked $diagnosticKey phase=${decoded.phase} mode=${decoded.mode} version=${decoded.version} " +
                                     "nativeMs=${SystemClock.elapsedRealtime() - start} ageMs=${currentAge / 1_000_000} " +
                                     "actualFps=$bigMapFps targetFps=15")
                                 if (synchronized(imageLock) { generation != frame.generation } ||
@@ -593,14 +600,14 @@ class CaptureService : Service() {
                                 } else {
                                     // Определение этажа grande карты (консервативная эвристика по колонке кнопок).
                                     val layerDecision = BigMapLayerDetector.detectLayer(bitmap)
-                                    Log.d(TAG, "BigMap layer=$layerDecision mode=$screenMode phase=${decoded.phase}")
+                                    Log.d(TAG, "BigMapV2 layer=$layerDecision mode=$screenMode phase=${decoded.phase} version=${decoded.version}")
                                     publishLive(epoch, LiveTrackingState(enabled = true, status = "paused",
                                         message = when {
                                             decoded.geometry != null -> "Большая карта подтверждена (этаж=${layerDecision.layerId ?: "поверхность"})"
                                             decoded.phase == "confirming" -> "Привязка-кандидат; проверяю свежий кадр"
                                             decoded.phase == "moving" -> "Карта движется; геометрия скрыта"
                                             decoded.phase == "acquiring" -> "Ожидаю повторной привязки"
-                                            else -> "Открыта большая карта; привязка ${decoded.mode} (${decoded.phase})"
+                                            else -> "Открыта большая карта; привязка v2 (${decoded.phase} v${decoded.version})"
                                         },
                                         packTitle = pack.manifest.title, frameWidth = frame.width, frameHeight = frame.height,
                                         screenMode = screenMode, bigMapGeometry = decoded.geometry,
