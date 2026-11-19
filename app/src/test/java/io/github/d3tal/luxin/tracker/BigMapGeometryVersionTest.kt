@@ -62,7 +62,7 @@ class BigMapGeometryVersionTest {
         assertEquals("moving", moved.phase)
         assertEquals(2, requireNotNull(moved.geometry).version)
         for (raw in listOf(tagged("moving", false), tagged("confirming", true),
-                tagged("moving", true).replace("\"found\"", "\"rejected\"))) {
+                tagged("moving", true).replace("found", "rejected"))) {
             assertNull(BigMapGeometryDecoder.decodeLiveV2(raw).geometry)
         }
     }
