@@ -1,10 +1,12 @@
 package io.github.d3tal.luxin.tracker
 
-import android.graphics.Color
 import org.junit.Test
 import org.junit.Assert.*
 
 class BigMapLayerDetectorTest {
+
+    private fun argb(a: Int, r: Int, g: Int, b: Int): Int =
+        (a shl 24) or (r shl 16) or (g shl 8) or b
 
     private fun makeGetPixel(
         width: Int,
@@ -16,11 +18,11 @@ class BigMapLayerDetectorTest {
     ): (Int, Int) -> Int = { x, y ->
         val inButton = x in buttonX until buttonX + buttonSize && y in buttonY until buttonY + buttonSize
         if (inButton) {
-            Color.argb(255, brightness, brightness, brightness)
+            argb(255, brightness, brightness, brightness)
         } else if (x >= (width * 0.88).toInt() && x <= (width * 0.96).toInt()) {
-            Color.argb(255, 30, 30, 30)
+            argb(255, 30, 30, 30)
         } else {
-            Color.argb(255, 10, 10, 10)
+            argb(255, 10, 10, 10)
         }
     }
 
@@ -42,13 +44,13 @@ class BigMapLayerDetectorTest {
 
     @Test
     fun `empty bitmap returns unknown`() {
-        val decision = BigMapLayerDetector.detectLayer(0, 0) { _, _ -> Color.argb(255, 0, 0, 0) }
+        val decision = BigMapLayerDetector.detectLayer(0, 0) { _, _ -> argb(255, 0, 0, 0) }
         assertEquals("unknown", decision.mode)
     }
 
     @Test
     fun `no bright buttons returns unknown`() {
-        val decision = BigMapLayerDetector.detectLayer(3120, 1440) { _, _ -> Color.argb(255, 30, 30, 30) }
+        val decision = BigMapLayerDetector.detectLayer(3120, 1440) { _, _ -> argb(255, 30, 30, 30) }
         assertEquals("unknown", decision.mode)
     }
 }
