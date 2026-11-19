@@ -1,12 +1,42 @@
 # Журнал изменений — Branch `feat/bigmap-detection-fable`
 
+## 3c9c8b8+ — P3 (полное выполнение): атомарный snapshot, L2 invalidation, L3 expiry
+
+### 1. Атомарный native snapshot с provenance (один владелец, снимок без нового вычисления)
+- `BigMapSession::snapshot()` — возвращает копию последней известной геометрии (`geometry_anchor_`) без вызова SIFT/регистрации
+- `BigMapSession::snapshot_revision()` — ревизия состояния, инкрементируется на каждом изменении (follow/reset/re registration)
+- `snapshot()` не изменяет состояние: `absolute_attempted=false`, `reset_reason="none"`, `follow.outcome="not_attempted"`
+- `nativeSnapshotBigMap()` — JNI entry point, возвращает v2 envelope с `snapshot_revision`
+- `NativeSplitTracker.snapshotBigMapJson()` — Kotlin обёртка
+- `testSnapshotAtomicNoNewComputation` — проверяет: одинаковая ревизия, одинаковая геометрия, нет нового вычисления, после reset ревизия растёт
+
+### 2. Полная инвалидация при rotation/resize (L2)
+- `CaptureService.resizeCapture()` теперь вызывает `engine.resetBigMap()` — сброс native `BigMapSession` (очистка `geometry_anchor_`, `anchor_`, `previous_transform_`)
+- Также сбрасывается `bigMap` (BigMapConfirmation), `bigMapRate`, publicada геометрия помечается как сброшенная
+- Старый якорь не наследуется новым размером/ориентацией кадра
+
+### 3. Native завис — матрица истекает независимо (L3)
+- `ensureActive()` после native return: если корутина отменена (пауза/стоп/rotation), результат не публикуется → `continue` к следующему кадру
+- `geometryExpiryJob` истекает матрицу по времени независимо от завершения native вызова
+- Generation/age проверка после native: устаревший кадр не публикуется
+
 ## 5bb6926 — P3 completion: V2 native entry point + cancellation guard
 
 - `CaptureService`: использует `nativeRegisterBigMapV2` (version=2 envelope) вместо legacy v1
 - `CaptureService`: cancellation guard после native return (проверка `ensureActive()` перед публикацией — поздний результат после паузы/отмены не публикуется)
 - `jni_bridge.cpp`: `nativeRegisterBigMapV2` emits version=2 в v2 envelope; legacy `nativeRegisterBigMap` emits version=1, оставлен для rollback
 - `BigMapGeometryDecoder.decodeStrictV1`: отрицательный тест совместимости (v2 payload к старому consumer → null geometry)
-- `BigMapGeometryVersionTest`: unit-тесты для v1/v2/unknown version/неполных полей
+- `BigMapGeometryVersionTest`: unit-тесты для v1/v2/unknown version decoding
+
+## f098656 — P3: декодер версии и нативная точка входа V2
+
+- `BigMapGeometry.version`: поле версии (>=1)
+- `BigMapGeometryDecoder.decode()`: версия 1 и 2 принимаются; неизвестная версия → hidden без геометрии
+- `BigMapGeometryDecoder.decodeStrictV1()`: отрицательный тест совместимости (v2 payload к старому consumer → null geometry)
+- `nativeRegisterBigMapV2`: нативная точка входа с version=2 в v2 envelope (`{"mode":..., "phase":..., "version":2, "v2":{...}}`)
+- `nativeRegisterBigMap` (legacy): emits version=1, оставлен для rollback между сеансами
+- `BigMapGeometryVersionTest`: юнит-тесты для v1/v2/unknown version/неполных полей
+- `BigMapSession`: геометрия публикуется в фазах tracking/moving/confirming (метки не исчезают при движении)
 
 ## e987061 — Этап 5/6: метки всегда видны, цвет по этажу
 
@@ -28,7 +58,7 @@
 
 ## 6d4c5e2 — Этап 3: детектор этажа grande карты
 
-- `BigMapLayerDetector`: определяет выбранный этаж по колонке кнопок уровней справа. Подсвеченная кнопка в нижней половине колонки = поверхность, иначе = уровень. При сомнении — `unknown` (неизвестный этаж ≠ поверхность)
+- `BigMapLayerDetector`: определяет выбранный этаж по колонке кнопков уровней справа. Подсвеченная кнопка в нижней половине колонки = поверхность, иначе = уровень. При сомнении — `unknown` (неизвестный этаж ≠ поверхность)
 - `BigMapLayerDetectorTest`: тесты surface/layer/unknown/empty bitmap
 
 ## 595f3ac — Этап 1+2: стабильный якорь grande карты + индекс маркеров
@@ -59,17 +89,17 @@
 - Десктоп C++: `test_bigmap_session`, `test_bigmap_geometry`, `test_bigmap_detector`, `test_bigmap_follow_mask`, `test_bigmap_acquisition`, `test_bigmap_replay_io`, `test_bigmap_competition`, `test_bigmap_pair_collection`, `test_bigmap_shadow`, `test_bigmap_revalidation`, `test_bigmap_local_geometry`, `benchmark_frames` — зелёные
 - Android CI: не запускался локально (запрещено планом), запустится автоматически при push в `feat/**` через GitHub Actions
 
-## Статус P3 (частично выполнено)
+## Статус P3 (выполнено полностью)
 - ✅ `BigMapGeometry.version` поле (>=1)
 - ✅ `BigMapGeometryDecoder.decode()` с версионным диспетчем: версия 1 и 2 принимаются, неизвестная версия → hidden без геометрии
 - ✅ `decodeStrictV1()`: отрицательный тест совместимости (v2 payload к старому consumer → null geometry)
 - ✅ `nativeRegisterBigMapV2`: нативная точка входа с version=2 в v2 envelope
 - ✅ `nativeRegisterBigMap` (legacy): emits version=1, оставлен для rollback
-- ✅ `BigMapGeometryVersionTest`: юнит-тесты для v1/v2/unknown version decoding
-- ⬜ Атомарный native snapshot с provenance (один владелец native-состояния)
-- ⬜ Проверка coroutine cancellation после завершения native (L1) — частично: CaptureService проверяет `ensureActive()` после native return
-- ⬜ Полная инвалидация при rotation/resize (L2) — частично: generation/resize сбрасывает сессию
-- ⬜ Native завис — матрица истекает независимо (L3) — частично: geometryExpiryJob убирает матрицу по timestamp
+- ✅ `BigMapGeometryVersionTest`: unit-тесты для v1/v2/unknown version decoding
+- ✅ `CaptureService`: использует `nativeRegisterBigMapV2`, cancellation guard после native return (ensureActive перед publish)
+- ✅ Атомарный native snapshot с provenance (один владелец, снимок без нового вычисления)
+- ✅ Полная инвалидация при rotation/resize (L2) — `engine.resetBigMap()` в `resizeCapture()`
+- ✅ Native завис — матрица истекает независимо (L3) — `ensureActive()` после native + `geometryExpiryJob`
 
 ## Статус P4 (не начат)
 - ⬜ Android CI через GitHub Actions (`./gradlew testDebugUnitTest assembleDebug --stacktrace`) — запустится автоматически при push в `feat/**`
@@ -85,5 +115,4 @@
 - Этап 6: `CaptureService.kt` — публикация геометрии в фазе tracking/moving/confirming — закоммичено
 
 ## Следующие шаги
-- P4: Android CI запустится автоматически при push в `feat/**`. Адресное тестирование на устройстве требует устройства Samsung SM-S938B и разрешения на установку APK.
-- P3 (дописать при необходимости): нативный snapshot с provenance, полная инвалидация при rotation/resize, native завис — матрица истекает независимо.
+P4: Android CI запустится автоматически при push в `feat/**`. Адресное тестирование на устройстве требует устройства Samsung SM-S938B и разрешения на установку APК.

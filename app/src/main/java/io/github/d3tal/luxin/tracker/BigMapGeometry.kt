@@ -265,7 +265,7 @@ object BigMapGeometryDecoder {
         val arrBody = v2Body.substring(arrStart + 1, arrEnd)
         return arrBody.split(',')
             .map { it.trim().toDoubleOrNull() }
-            .takeWhile { it != null }
+            .filterNotNull()
             .take(6)
             .let { if (it.size == 6) it else null }
     }

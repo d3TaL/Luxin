@@ -3,6 +3,7 @@ package io.github.d3tal.luxin.tracker
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
+import android.util.DisplayMetrics
 import android.view.View
 import io.github.d3tal.luxin.data.LocalMarkerRecord
 
@@ -45,6 +46,12 @@ class BigMapMarkerOverlay(context: Context) : View(context) {
 
     /** Фиксированный радиус маркера в пикселях экрана (не меняется при зуме карты). */
     private val markerRadiusPx = 8f
+
+    /** Сохраняет метрики дисплея (зарезервировано для масштабирования меток под плотность экрана). */
+    fun setDisplayMetrics(metrics: DisplayMetrics) {
+        // Reserved for future density-based scaling; current implementation uses
+        // canvas.width/height in onDraw() directly.
+    }
 
     fun setMarkers(markers: List<BigMapMarkerWithLayer>, geometry: BigMapGeometry?) {
         this.markers = markers
