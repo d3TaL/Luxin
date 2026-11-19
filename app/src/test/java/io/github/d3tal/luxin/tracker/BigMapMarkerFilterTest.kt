@@ -44,7 +44,7 @@ class BigMapMarkerFilterTest {
 
         val result = BigMapMarkerFilter.filterMarkersForBigMap(
             "twt702", layerDecision(), 3120, 1440,
-            BigMapGeometry("twt702", "ref", listOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0), 3120, 1440, 0.0, 0, 0, 0.0, 0.0)
+            BigMapGeometry("twt702", "ref", listOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0), 3120, 1440, 0.0, 12, 12, 0.5, 0.5)
         )
 
         assertEquals(1, result.size)
@@ -57,7 +57,7 @@ class BigMapMarkerFilterTest {
 
         val result = BigMapMarkerFilter.filterMarkersForBigMap(
             "twt702", layerDecision("unknown", false, null), 3120, 1440,
-            BigMapGeometry("twt702", "ref", listOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0), 3120, 1440, 0.0, 0, 0, 0.0, 0.0)
+            BigMapGeometry("twt702", "ref", listOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0), 3120, 1440, 0.0, 12, 12, 0.5, 0.5)
         )
 
         assertEquals(0, result.size)
@@ -72,7 +72,7 @@ class BigMapMarkerFilterTest {
 
         val result = BigMapMarkerFilter.filterMarkersForBigMap(
             "twt702", layerDecision("surface", true, null), 3120, 1440,
-            BigMapGeometry("twt702", "ref", listOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0), 3120, 1440, 0.0, 0, 0, 0.0, 0.0)
+            BigMapGeometry("twt702", "ref", listOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0), 3120, 1440, 0.0, 12, 12, 0.5, 0.5)
         )
 
         assertEquals(1, result.size)
@@ -88,7 +88,7 @@ class BigMapMarkerFilterTest {
 
         val result = BigMapMarkerFilter.filterMarkersForBigMap(
             "twt702", layerDecision("layer", false, "SNOWMELT_DRAINAGE_CHANNEL_UG1"), 3120, 1440,
-            BigMapGeometry("twt702", "ref", listOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0), 3120, 1440, 0.0, 0, 0, 0.0, 0.0)
+            BigMapGeometry("twt702", "ref", listOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0), 3120, 1440, 0.0, 12, 12, 0.5, 0.5)
         )
 
         assertEquals(1, result.size)
@@ -104,7 +104,7 @@ class BigMapMarkerFilterTest {
 
         val result = BigMapMarkerFilter.filterMarkersForBigMap(
             "twt702", layerDecision(), 3120, 1440,
-            BigMapGeometry("twt702", "ref", listOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0), 3120, 1440, 0.0, 0, 0, 0.0, 0.0)
+            BigMapGeometry("twt702", "ref", listOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0), 3120, 1440, 0.0, 12, 12, 0.5, 0.5)
         )
 
         assertEquals(1, result.size)
