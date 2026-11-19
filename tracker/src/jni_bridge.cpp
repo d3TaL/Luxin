@@ -218,6 +218,47 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeRegisterBigMapV2(
     }
 }
 
+JNIEXPORT jstring JNICALL
+Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeSnapshotBigMap(
+    JNIEnv* env, jobject /*thiz*/, jlong handle
+) {
+    auto* ctx = reinterpret_cast<NativeTrackerContext*>(handle);
+    if (!ctx) {
+        LOGI("BigMapSnapshot stage=error reason=closed_tracker");
+        return env->NewStringUTF("{\"error\":\"closed tracker\"}");
+    }
+    std::lock_guard<std::mutex> lock(ctx->mutex);
+    const auto result = ctx->bigmap.snapshot();
+    const auto& g = result.geometry;
+    std::ostringstream out;
+    out.imbue(std::locale::classic());
+    out << std::setprecision(17) << "{\"mode\":" << jsonString(g.mode)
+        << ",\"phase\":" << jsonString(result.phase)
+        << ",\"version\":2"
+        << ",\"snapshot_revision\":" << result.snapshot_revision;
+    if (g.mode == "found") {
+        out << ",\"v2\":{"
+            << "\"space\":" << jsonString(g.space)
+            << ",\"reference\":" << jsonString(g.reference)
+            << ",\"frameWidth\":" << g.frame_width
+            << ",\"frameHeight\":" << g.frame_height
+            << ",\"timestampSeconds\":" << g.timestamp_seconds
+            << ",\"inliers\":" << g.inliers
+            << ",\"matches\":" << g.matches
+            << ",\"errorPx\":" << g.error_px
+            << ",\"support\":" << g.support
+            << ",\"matrix\":[";
+        for (int i = 0; i < 6; ++i) {
+            if (i) out << ',';
+            out << g.matrix.at<double>(i / 3, i % 3);
+        }
+        out << ']';
+        out << "}";
+    }
+    out << '}';
+    return env->NewStringUTF(out.str().c_str());
+}
+
 JNIEXPORT jboolean JNICALL
 Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeIsBigMap(
     JNIEnv* env, jobject /*thiz*/, jobject bitmap

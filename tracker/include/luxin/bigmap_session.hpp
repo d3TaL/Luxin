@@ -53,7 +53,8 @@ struct BigMapFollowStats {
 cv::Mat bigMapFollowComparisonMask(cv::Size size, const cv::Mat& anchor_to_current);
 
 struct BigMapSessionResult {
-    BigMapGeometry geometry; // mode=found only after a fresh stationary confirmation
+    BigMapSessionResult() : snapshot_revision(0) {}
+    BigMapGeometry geometry;
     std::string phase = "acquiring";
     bool absolute_attempted = false;
     BigMapRegistrationStats registration;
@@ -75,6 +76,8 @@ struct BigMapSessionResult {
     double acquisition_movement_px = -1.0;
     int acquisition_still_frames = 0;
     double acquisition_still_seconds = 0.0;
+    // Ревизия снимка: позволяет вызывающему сверить, что снимок не устарел.
+    int snapshot_revision = 0;
 };
 
 // Synchronous, diagnostic-only observer immediately BEFORE registerBigMap can block.
@@ -91,6 +94,14 @@ public:
     BigMapSessionResult update(const cv::Mat& frame,
         const std::vector<std::shared_ptr<LayerReference>>& references, double timestamp_seconds,
         BigMapSessionDiagnosticSink before_absolute = nullptr, void* diagnostic_context = nullptr);
+
+    // Атомарный снимок текущего состояния без запуска нового вычисления.
+    // Возвращает копию снимка на момент вызова; вызывающий может сравнить
+    // snapshot_revision() до и после, чтобы убедиться, что состояние не изменилось.
+    BigMapSessionResult snapshot() const;
+    // Текущая ревизия снимка; инкрементируется при каждом обновлении состояния
+    // (успешном follow, ресете, абсолютной регистрации, истечении).
+    int snapshot_revision() const;
 
 private:
     // Опубликованная абсолютная привязка (регистрация registerBigMap). Не перезаписывается follow'ом.
@@ -112,6 +123,11 @@ private:
     // Счётчик последовательных неудач follow перед отказом от анкора.
     int not_ok_counter_ = 0;
     static constexpr int MAX_NOT_OK = 3;
+
+    // Ревизия состояния сессии; инкрементируется при любом изменении (успешном follow,
+    // ресете, абсолютной регистрации, истечении). Используется для проверки, что
+    // снимок не устарел.
+    int snapshot_revision_ = 0;
 
     cv::Mat acquisition_gray_;
     std::vector<cv::KeyPoint> acquisition_keypoints_;

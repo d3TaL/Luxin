@@ -95,6 +95,19 @@ class NativeSplitTracker(unitScale: Double = 0.0) : Closeable {
     /** V2 native entry point with version=2 in payload. */
     private external fun nativeRegisterBigMapV2(handle: Long, frameBitmap: Bitmap, timestampSeconds: Double): String
 
+    /**
+     * Атомарный снимок текущего состояния сессии без запуска нового вычисления SIFT.
+     * Возвращает последнюю известную геометрию (v2 envelope) или acquiring, если привязки нет.
+     * snapshot_revision позволяет Calling-стороне сверить, что снимок не устарел.
+     */
+    @Synchronized
+    fun snapshotBigMapJson(): String {
+        if (handle == 0L) return "{\"error\":\"closed tracker\"}"
+        return nativeSnapshotBigMap(handle)
+    }
+
+    private external fun nativeSnapshotBigMap(handle: Long): String
+
     @Synchronized
     fun resetBigMap() {
         if (handle != 0L) nativeResetBigMap(handle)

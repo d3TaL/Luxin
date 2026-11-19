@@ -175,6 +175,28 @@ cv::Mat bigMapFollowComparisonMask(cv::Size size, const cv::Mat& anchor_to_curre
     return valid;
 }
 
+BigMapSessionResult BigMapSession::snapshot() const {
+    BigMapSessionResult result;
+    result.geometry = geometry_anchor_;
+    result.phase = anchor_gray_.empty() ? "acquiring" : "tracking";
+    result.absolute_attempted = false;
+    result.reset_reason = "none";
+    result.anchor_expired = false;
+    result.anchor_age_seconds = -1.0;
+    result.observation_gap_seconds = -1.0;
+    result.since_attempt_seconds = -1.0;
+    result.movement_px = -1.0;
+    result.stable_frames = stable_frames_;
+    result.follow.outcome = "not_attempted";
+    result.follow.geometry_accepted = false;
+    result.snapshot_revision = snapshot_revision_;
+    return result;
+}
+
+int BigMapSession::snapshot_revision() const {
+    return snapshot_revision_;
+}
+
 void BigMapSession::reset() {
     anchor_gray_.release();
     anchor_descriptors_.release();
@@ -195,6 +217,7 @@ void BigMapSession::reset() {
     acquisition_timestamp_ = -1.0;
     acquisition_last_timestamp_ = -1.0;
     acquisition_still_frames_ = 0;
+    ++snapshot_revision_;
 }
 
 BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
@@ -274,6 +297,7 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
                 result.phase = "rejected";
                 return result;
             }
+            ++snapshot_revision_;
             return result;
         }
 
@@ -293,6 +317,7 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
             appearance_suspended_ = false;
             suspended_still_frames_ = 0;
             not_ok_counter_ = 0;
+            ++snapshot_revision_;
             result.reset_reason = "follow_failed";
             result.phase = "acquiring";
             return result;
@@ -368,6 +393,7 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
     acquisition_last_timestamp_ = -1.0;
     acquisition_still_frames_ = 0;
     result.phase = "confirming";
+    ++snapshot_revision_;
     return result;
 } catch (...) {
     reset();

@@ -272,10 +272,15 @@ class CaptureService : Service() {
             generation++
             old?.close()
             trackingRevision++
+            // L2: полная инвалидация native big-map сессии при rotation/resize — старый якорь
+            // не наследуется новым размером/ориентацией кадра.
+            engine.resetBigMap()
+            bigMap.reset()
+            bigMapRate.reset()
             val previous = LiveTrackingStatus.state.value
             if (previous.bigMapGeometry != null) {
                 LiveTrackingStatus.publish(LiveTrackingState(enabled = previous.enabled, status = "paused",
-                    message = "Размер кадра изменился", packTitle = previous.packTitle))
+                    message = "Размер кадра изменился — привязка сброшена", packTitle = previous.packTitle))
             }
             Log.i(TAG, "Capture resized to ${width}x$height, generation=$generation rev=$trackingRevision")
         }

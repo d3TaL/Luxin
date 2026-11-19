@@ -169,6 +169,44 @@ void testAnchorIndependentOfLayer(const cv::Mat& frame,
     assert(std::abs(actualScale - expectedScale) < 0.05);
 }
 
+// Stage-2 snapshot: atomic snapshot() returns last known geometry without new computation.
+void testSnapshotAtomicNoNewComputation(const cv::Mat& frame,
+    const std::shared_ptr<LayerReference>& ref) {
+    BigMapSession session;
+    acquireSettled(session, frame, {ref}, 1.0);
+    session.update(frame, {ref}, 1.5);
+    auto stable = session.update(frame, {ref}, 2.0);
+    assert(stable.geometry.mode == "found");
+
+    const int rev1 = session.snapshot_revision();
+    auto snap1 = session.snapshot();
+    assert(snap1.geometry.mode == "found");
+    assert(snap1.snapshot_revision == rev1);
+    assert(snap1.snapshot_revision == session.snapshot_revision());
+
+    // A second snapshot without any update must return the same revision and geometry.
+    const int rev2 = session.snapshot_revision();
+    auto snap2 = session.snapshot();
+    assert(rev2 == rev1);
+    assert(snap2.snapshot_revision == rev1);
+    assert(snap2.geometry.mode == snap1.geometry.mode);
+    assert(snap2.geometry.timestamp_seconds == snap1.geometry.timestamp_seconds);
+    assert(!snap2.geometry.matrix.empty());
+
+    // Snapshot must NOT trigger a new absolute attempt or reset.
+    assert(!snap2.absolute_attempted);
+    assert(std::string(snap2.reset_reason) == "none");
+    assert(std::string(snap2.follow.outcome) == "not_attempted");
+
+    // After a reset, revision changes and snapshot reflects cleared state.
+    session.reset();
+    assert(session.snapshot_revision() > rev1);
+    auto snap3 = session.snapshot();
+    assert(snap3.snapshot_revision > rev1);
+    assert(snap3.geometry.matrix.empty());
+    assert(std::string(snap3.phase) == "acquiring");
+}
+
 } // namespace
 
 int main() {
@@ -191,6 +229,7 @@ int main() {
     testRepeatedFailureResetsAnchor(frame, ref);
     testMovingMapKeepsAnchor(frame, ref);
     testAnchorIndependentOfLayer(frame, ref);
+    testSnapshotAtomicNoNewComputation(frame, ref);
 
     std::cout << "big-map stage-2 anchor stability tests passed\n";
     return 0;
