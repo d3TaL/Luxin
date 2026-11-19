@@ -12,6 +12,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
+import android.util.DisplayMetrics
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -21,6 +22,13 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import io.github.d3tal.luxin.capture.CaptureService
+import io.github.d3tal.luxin.tracker.BigMapGeometry
+import io.github.d3tal.luxin.tracker.BigMapGeometryDecoder
+import io.github.d3tal.luxin.tracker.BigMapLayerDetector
+import io.github.d3tal.luxin.tracker.BigMapMarkerFilter
+import io.github.d3tal.luxin.tracker.BigMapMarkerOverlay
+import io.github.d3tal.luxin.tracker.LayerDecision
+import io.github.d3tal.luxin.tracker.LiveTrackingState
 import io.github.d3tal.luxin.tracker.LiveTrackingStatus
 import io.github.d3tal.luxin.tracker.formatTrackingHud
 import kotlinx.coroutines.CoroutineScope
@@ -41,6 +49,9 @@ class OverlayService : Service() {
     private var windowManager: WindowManager? = null
     private var markerOverlayView: View? = null
     private var markerParams: WindowManager.LayoutParams? = null
+    private var bigMapMarkerOverlayView: View? = null
+    private var bigMapMarkerOverlayParams: WindowManager.LayoutParams? = null
+    private var bigMapMarkerOverlay: BigMapMarkerOverlay? = null
     private var controlHudView: View? = null
     private var calibrationText: TextView? = null
     private var stepButton: Button? = null
@@ -170,6 +181,26 @@ class OverlayService : Service() {
             }
         }
         markerOverlayView = marker
+
+        // 3. Full-screen big-map marker overlay. Not touchable, transparent, coordinates match capture.
+        val bigMapParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            alpha = 0.8f
+        }
+        bigMapMarkerOverlay = BigMapMarkerOverlay(this)
+        bigMapMarkerOverlay?.setDisplayMetrics(resources.displayMetrics)
+        bigMapMarkerOverlayView = bigMapMarkerOverlay
+        bigMapMarkerOverlayParams = bigMapParams
 
         // 2. Floating HUD: manual calibration of the ring plus snapshot buttons
         val hudParams = WindowManager.LayoutParams(
@@ -323,6 +354,7 @@ class OverlayService : Service() {
         try {
             wm.addView(marker, params)
             wm.addView(scroll, hudParams)
+            wm.addView(bigMapMarkerOverlayView, bigMapMarkerOverlayParams)
             _isShowing.value = true
 
             scope.launch {
@@ -361,6 +393,24 @@ class OverlayService : Service() {
                             if (res.error != null || res.overlayLeaked) Color.rgb(255, 110, 110)
                             else Color.rgb(255, 230, 120)
                         )
+                    }
+                }
+            }
+
+            // Big-map marker overlay: collect filtered markers and repaint on geometry change.
+            scope.launch {
+                LiveTrackingStatus.state.collect { s ->
+                    if (s.screenMode == "big_map" && s.bigMapGeometry != null && s.bigMapGeometryMode == "tracking") {
+                        val filtered = BigMapMarkerFilter.filterMarkersForBigMap(
+                            s.bigMapGeometry.space,
+                            LayerDecision("surface", true, "surface", "default"), // TODO: real layer detection
+                            s.frameWidth,
+                            s.frameHeight,
+                            s.bigMapGeometry
+                        )
+                        bigMapMarkerOverlay?.setMarkers(filtered, s.bigMapGeometry)
+                    } else {
+                        bigMapMarkerOverlay?.clear()
                     }
                 }
             }
@@ -420,6 +470,13 @@ class OverlayService : Service() {
                 e.printStackTrace()
             }
         }
+        bigMapMarkerOverlayView?.let { view ->
+            try {
+                windowManager?.removeView(view)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
         controlHudView?.let { view ->
             try {
                 windowManager?.removeView(view)
@@ -429,6 +486,9 @@ class OverlayService : Service() {
         }
         markerOverlayView = null
         markerParams = null
+        bigMapMarkerOverlayView = null
+        bigMapMarkerOverlayParams = null
+        bigMapMarkerOverlay = null
         controlHudView = null
         calibrationText = null
         stepButton = null
