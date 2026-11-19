@@ -93,17 +93,26 @@ public:
         BigMapSessionDiagnosticSink before_absolute = nullptr, void* diagnostic_context = nullptr);
 
 private:
+    // Опубликованная абсолютная привязка (регистрация registerBigMap). Не перезаписывается follow'ом.
+    BigMapGeometry geometry_anchor_;
+
+    // ORB-признаки кадра абсолютной регистрации — фиксированы, не передвигаются на каждый follow-кадр.
     cv::Mat anchor_gray_;
-    cv::Mat anchor_descriptors_;
     std::vector<cv::KeyPoint> anchor_keypoints_;
+    cv::Mat anchor_descriptors_;
     BigMapGeometry anchor_;
-    cv::Mat previous_transform_;
+    cv::Mat previous_transform_; // последний transform от кадра абсолютной регистрации к текущему
     double previous_timestamp_ = -1.0;
     double last_attempt_ = -1.0;
     cv::Size frame_size_;
     int stable_frames_ = 0;
     bool appearance_suspended_ = false;
     int suspended_still_frames_ = 0;
+
+    // Счётчик последовательных неудач follow перед отказом от анкора.
+    int not_ok_counter_ = 0;
+    static constexpr int MAX_NOT_OK = 3;
+
     cv::Mat acquisition_gray_;
     std::vector<cv::KeyPoint> acquisition_keypoints_;
     cv::Mat acquisition_descriptors_;

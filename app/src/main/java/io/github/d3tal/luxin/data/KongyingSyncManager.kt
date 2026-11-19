@@ -1,6 +1,7 @@
 package io.github.d3tal.luxin.data
 
 import android.content.Context
+import io.github.d3tal.luxin.data.KongyingMarkerStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -89,13 +90,11 @@ object KongyingSyncManager {
             _syncState.value = _syncState.value.copy(status = "Загрузка индекса меток (markers MD5)...")
             val markerMd5s = fetchMd5List(token, "/api/marker_doc/list_page_bin_md5")
 
-            // Download and parse the latest marker chunks (last chunk holds newest regions like Fontaine 4.6 / Snezhnaya)
-            val chunksToInspect = listOfNotNull(markerMd5s.firstOrNull(), markerMd5s.lastOrNull()).distinctBy { it.md5 }
+            // Загружаем ВСЕ чанки меток (ранее только первый и последний из 46).
             val parsedRecords = mutableListOf<LocalMarkerRecord>()
-
-            for ((idx, entry) in chunksToInspect.withIndex()) {
+            for ((idx, entry) in markerMd5s.withIndex()) {
                 _syncState.value = _syncState.value.copy(
-                    status = "Загрузка и разбор чанка меток ${idx + 1}/${chunksToInspect.size} (всего в индексе ${markerMd5s.size})..."
+                    status = "Загрузка и разбор чанка меток ${idx + 1}/${markerMd5s.size}..."
                 )
                 val chunkBytes = fetchAndCacheGzipChunk(
                     context, token, "markers_${entry.md5}.bin", "/api/marker_doc/list_page_bin/${entry.md5}"
@@ -127,6 +126,9 @@ object KongyingSyncManager {
                     )
                 }
             }
+
+            // Сохраняем все маркеры в хранилище с индексом по'espace.
+            KongyingMarkerStore.replaceAll(parsedRecords)
 
             val undergroundCount = parsedRecords.count { it.isUnderground || it.levels.isNotEmpty() }
             val result = SyncSummary(
