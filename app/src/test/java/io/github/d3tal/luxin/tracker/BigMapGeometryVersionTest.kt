@@ -74,8 +74,8 @@ class BigMapGeometryVersionTest {
         assertEquals(1, result.version)
         assertNotNull(result.geometry)
         assertEquals("twt702", result.geometry?.space)
-        assertEquals(100.0, result.geometry?.matrix?.get(2), 0.001)
-        assertEquals(200.0, result.geometry?.matrix?.get(5), 0.001)
+        assertEquals(100.0, result.geometry?.matrix?.get(2) ?: 0.0, 0.001)
+        assertEquals(200.0, result.geometry?.matrix?.get(5) ?: 0.0, 0.001)
     }
 
     @Test

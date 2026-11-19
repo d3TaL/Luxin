@@ -75,7 +75,7 @@ class KongyingMarkerStoreTest {
         assertEquals(2, KongyingMarkerStore.size)
         assertEquals(1, KongyingMarkerStore.markersForSpace("twt702").size)
         assertEquals(1, KongyingMarkerStore.markersForSpace("kzsd2").size)
-        assertFalse(KongyingMarkerStore.markersForSpace("twt702").any { it.id == 2 })
+        assertFalse(KongyingMarkerStore.markersForSpace("twt702").any { it.id == 2L })
     }
 
     @Test
