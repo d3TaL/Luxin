@@ -76,7 +76,7 @@ class BigMapMarkerFilterTest {
         )
 
         assertEquals(1, result.size)
-        assertEquals(2L, result[0].id)
+        assertEquals(2L, result[0].record.id)
     }
 
     @Test
