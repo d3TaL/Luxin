@@ -401,9 +401,11 @@ class OverlayService : Service() {
             scope.launch {
                 LiveTrackingStatus.state.collect { s ->
                     if (s.screenMode == "big_map" && s.bigMapGeometry != null && s.bigMapGeometryMode == "tracking") {
+                        val layerDecision = s.bigMapLayerDecision
+                            ?: LayerDecision(null, false, "unknown", "no layer detection")
                         val filtered = BigMapMarkerFilter.filterMarkersForBigMap(
                             s.bigMapGeometry.space,
-                            LayerDecision("surface", true, "surface", "default"), // TODO: real layer detection
+                            layerDecision,
                             s.frameWidth,
                             s.frameHeight,
                             s.bigMapGeometry

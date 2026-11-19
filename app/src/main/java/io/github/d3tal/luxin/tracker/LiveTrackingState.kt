@@ -40,7 +40,8 @@ data class LiveTrackingState(
     val actualFps: Double? = null,
     val screenMode: String = "unknown",
     val bigMapGeometry: BigMapGeometry? = null,
-    val bigMapGeometryMode: String = "unknown"
+    val bigMapGeometryMode: String = "unknown",
+    val bigMapLayerDecision: LayerDecision? = null
 )
 
 fun formatTrackingHud(s: LiveTrackingState): String = buildString {

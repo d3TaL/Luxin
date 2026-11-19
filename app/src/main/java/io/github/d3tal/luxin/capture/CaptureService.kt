@@ -32,6 +32,9 @@ import io.github.d3tal.luxin.tracker.NativeSplitTracker
 import io.github.d3tal.luxin.tracker.PlayerArrowSignal
 import io.github.d3tal.luxin.tracker.BigMapConfirmation
 import io.github.d3tal.luxin.tracker.BigMapGeometryDecoder
+import io.github.d3tal.luxin.tracker.BigMapLayerDetector
+import io.github.d3tal.luxin.tracker.BigMapMarkerFilter
+import io.github.d3tal.luxin.tracker.LayerDecision
 import io.github.d3tal.luxin.tracker.bigMapFrameIsCurrent
 import io.github.d3tal.luxin.tracker.bigMapGeometryRemainingMs
 import io.github.d3tal.luxin.tracker.LiveTrackingCadence
@@ -588,9 +591,12 @@ class CaptureService : Service() {
                                     waiting("Привязка устарела; ожидаю обновление", frame.width, frame.height,
                                         screenMode = "big_map", reason = "generation_or_age_after_native")
                                 } else {
+                                    // Определение этажа grande карты (консервативная эвристика по колонке кнопок).
+                                    val layerDecision = BigMapLayerDetector.detectLayer(bitmap)
+                                    Log.d(TAG, "BigMap layer=$layerDecision mode=$screenMode phase=${decoded.phase}")
                                     publishLive(epoch, LiveTrackingState(enabled = true, status = "paused",
                                         message = when {
-                                            decoded.geometry != null -> "Большая карта подтверждена (этаж неизвестен)"
+                                            decoded.geometry != null -> "Большая карта подтверждена (этаж=${layerDecision.layerId ?: "поверхность"})"
                                             decoded.phase == "confirming" -> "Привязка-кандидат; проверяю свежий кадр"
                                             decoded.phase == "moving" -> "Карта движется; геометрия скрыта"
                                             decoded.phase == "acquiring" -> "Ожидаю повторной привязки"
@@ -598,7 +604,8 @@ class CaptureService : Service() {
                                         },
                                         packTitle = pack.manifest.title, frameWidth = frame.width, frameHeight = frame.height,
                                         screenMode = screenMode, bigMapGeometry = decoded.geometry,
-                                        bigMapGeometryMode = decoded.phase, inliers = decoded.geometry?.inliers ?: 0,
+                                        bigMapGeometryMode = decoded.phase, bigMapLayerDecision = layerDecision,
+                                        inliers = decoded.geometry?.inliers ?: 0,
                                         nativeMs = SystemClock.elapsedRealtime() - start, frameAgeMs = currentAge / 1_000_000,
                                         actualFps = bigMapFps),
                                         expectedGeneration = frame.generation, timestampNs = frame.timestampNs,
