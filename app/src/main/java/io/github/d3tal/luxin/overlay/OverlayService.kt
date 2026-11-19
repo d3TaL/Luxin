@@ -398,9 +398,12 @@ class OverlayService : Service() {
             }
 
             // Big-map marker overlay: collect filtered markers and repaint on geometry change.
+            // Markers always move with the map: show in tracking/moving/confirming phases
+            // whenever we have a valid geometry (last known matrix).
             scope.launch {
                 LiveTrackingStatus.state.collect { s ->
-                    if (s.screenMode == "big_map" && s.bigMapGeometry != null && s.bigMapGeometryMode == "tracking") {
+                    if (s.screenMode == "big_map" && s.bigMapGeometry != null &&
+                        (s.bigMapGeometryMode == "tracking" || s.bigMapGeometryMode == "moving" || s.bigMapGeometryMode == "confirming")) {
                         val layerDecision = s.bigMapLayerDecision
                             ?: LayerDecision(null, false, "unknown", "no layer detection")
                         val filtered = BigMapMarkerFilter.filterMarkersForBigMap(

@@ -89,19 +89,20 @@ void testTransientFailureKeepsAnchor(const cv::Mat& frame,
     session.update(frame, {ref}, 1.5);
     assert(session.update(frame, {ref}, 2.0).geometry.mode == "found");
 
-    // One appearance failure: anchor survives, no absolute re-search.
+    // One appearance failure: anchor survives, geometry published (last known matrix).
     // Follow continues against the fixed anchor; next clean frame recovers publishing.
     cv::Mat tile_edit = frame.clone();
     tile_edit(cv::Rect(630, 360, 90, 90)).setTo(250);
     auto fail1 = session.update(tile_edit, {ref}, 3.5);
     assert(!fail1.absolute_attempted);
-    assert(fail1.geometry.matrix.empty()); // appearance failure -> no geometry publish
+    // Geometry published: last known matrix, markers stay on screen moving with map.
+    assert(!fail1.geometry.matrix.empty());
     assert(std::string(fail1.follow.outcome) == "tile_change");
 
     // Clean frame: tracking recovers against same anchor without absolute re-search.
     auto recover1 = session.update(frame, {ref}, 4.0);
     assert(!recover1.absolute_attempted);
-    assert(recover1.geometry.matrix.empty() || recover1.geometry.mode == "found");
+    assert(recover1.geometry.mode == "found");
 
     auto recover2 = session.update(frame, {ref}, 4.5);
     assert(!recover2.absolute_attempted);

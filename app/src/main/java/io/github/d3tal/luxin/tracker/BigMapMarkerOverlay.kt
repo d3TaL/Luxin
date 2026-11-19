@@ -3,7 +3,6 @@ package io.github.d3tal.luxin.tracker
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
-import android.util.DisplayMetrics
 import android.view.View
 import io.github.d3tal.luxin.data.LocalMarkerRecord
 
@@ -13,6 +12,8 @@ import io.github.d3tal.luxin.data.LocalMarkerRecord
  * Рисует метки Kongying, спроецированные через [BigMapGeometry.toDisplay] из координат
  * Kongying в пиксели экрана. Оверлей не касаемый, прозрачный, координаты совпадают с
  * захватом MediaProjection.
+ *
+ * Размер метки фиксирован в пикселях экрана и не зависит от масштаба карты (зума).
  */
 class BigMapMarkerOverlay(context: Context) : View(context) {
 
@@ -28,15 +29,9 @@ class BigMapMarkerOverlay(context: Context) : View(context) {
 
     private var markers: List<LocalMarkerRecord> = emptyList()
     private var geometry: BigMapGeometry? = null
-    private var displayWidth = 0
-    private var displayHeight = 0
-    private var density = 1f
 
-    fun setDisplayMetrics(displayMetrics: DisplayMetrics) {
-        density = displayMetrics.density
-        displayWidth = displayMetrics.widthPixels
-        displayHeight = displayMetrics.heightPixels
-    }
+    /** Фиксированный радиус маркера в пикселях экрана (не меняется при зуме карты). */
+    private val markerRadiusPx = 8f
 
     fun setMarkers(markers: List<LocalMarkerRecord>, geometry: BigMapGeometry?) {
         this.markers = markers
@@ -53,17 +48,13 @@ class BigMapMarkerOverlay(context: Context) : View(context) {
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val geom = geometry ?: return
-        val scale = density
 
         for (marker in markers) {
-            val (dx, dy) = geom.toDisplay(marker.x, marker.y, displayWidth, displayHeight)
-            val cx = (dx / scale).toFloat()
-            val cy = (dy / scale).toFloat()
+            val (dx, dy) = geom.toDisplay(marker.x, marker.y, canvas.width, canvas.height)
 
-            if (cx >= 0f && cx <= width && cy >= 0f && cy <= height) {
-                val radius = 6f / scale
-                canvas.drawCircle(cx, cy, radius, markerPaint)
-                canvas.drawCircle(cx, cy, radius, outlinePaint)
+            if (dx.isFinite() && dy.isFinite() && dx >= 0f && dx <= canvas.width && dy >= 0f && dy <= canvas.height) {
+                canvas.drawCircle(dx.toFloat(), dy.toFloat(), markerRadiusPx, markerPaint)
+                canvas.drawCircle(dx.toFloat(), dy.toFloat(), markerRadiusPx, outlinePaint)
             }
         }
     }

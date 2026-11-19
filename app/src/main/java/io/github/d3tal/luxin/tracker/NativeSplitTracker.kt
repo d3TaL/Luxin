@@ -67,6 +67,10 @@ class NativeSplitTracker(unitScale: Double = 0.0) : Closeable {
 
     private external fun nativeIsBigMap(frameBitmap: Bitmap): Boolean
 
+    /**
+     * Legacy v1 big-map registration. Returns JSON with mode=found/tracking/absolute and
+     * matrix in original frame pixels. Kept for explicit rollback between sessions.
+     */
     @Synchronized
     fun registerBigMapJson(frameBitmap: Bitmap, timestampSeconds: Double): String {
         if (handle == 0L) return "{\"error\":\"closed tracker\"}"
@@ -74,7 +78,22 @@ class NativeSplitTracker(unitScale: Double = 0.0) : Closeable {
         return nativeRegisterBigMap(handle, frameBitmap, timestampSeconds)
     }
 
+    /**
+     * V2 big-map registration with explicit version dispatch.
+     * Returns JSON envelope with version field. Unknown version to old consumer → null geometry.
+     * This is the only entry point for production v2; legacy found path is preserved for rollback.
+     */
+    @Synchronized
+    fun registerBigMapV2Json(frameBitmap: Bitmap, timestampSeconds: Double): String {
+        if (handle == 0L) return "{\"error\":\"closed tracker\"}"
+        require(timestampSeconds.isFinite() && timestampSeconds >= 0)
+        return nativeRegisterBigMapV2(handle, frameBitmap, timestampSeconds)
+    }
+
     private external fun nativeRegisterBigMap(handle: Long, frameBitmap: Bitmap, timestampSeconds: Double): String
+
+    /** V2 native entry point with version=2 in payload. */
+    private external fun nativeRegisterBigMapV2(handle: Long, frameBitmap: Bitmap, timestampSeconds: Double): String
 
     @Synchronized
     fun resetBigMap() {

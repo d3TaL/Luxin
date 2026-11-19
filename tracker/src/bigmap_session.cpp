@@ -242,6 +242,9 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
 
         if (ok && !appearance_failure) {
             // Clean follow against the absolute anchor: advance published geometry.
+            // Markers always move with the map: publish geometry even while moving
+            // (movement > 0.6). The phase label reflects motion, but geometry is
+            // always available for overlay rendering.
             previous_transform_ = transform.clone();
             stable_frames_ = movement <= 0.6 ? stable_frames_ + 1 : 0;
             result.movement_px = movement;
@@ -251,32 +254,31 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
             appearance_suspended_ = false;
             result.appearance_suspended = false;
             result.phase = stable_frames_ >= 2 ? "tracking" : movement <= 0.6 ? "confirming" : "moving";
-            if (stable_frames_ >= 2) {
-                // Compose published geometry: geometry_anchor_ (Kongying -> anchor frame) * motion (anchor -> current).
-                const double sx = double(current.cols) / frame.cols, sy = double(current.rows) / frame.rows;
-                cv::Mat scale = (cv::Mat_<double>(3, 3) << sx, 0, 0, 0, sy, 0, 0, 0, 1);
-                cv::Mat inverse = (cv::Mat_<double>(3, 3) << 1 / sx, 0, 0, 0, 1 / sy, 0, 0, 0, 1);
-                cv::Mat motion = cv::Mat::eye(3, 3, CV_64F), anchor = cv::Mat::eye(3, 3, CV_64F);
-                transform.copyTo(motion(cv::Rect(0, 0, 3, 2)));
-                geometry_anchor_.matrix.copyTo(anchor(cv::Rect(0, 0, 3, 2)));
-                cv::Mat composed = inverse * motion * scale * anchor;
-                const double a = (composed.at<double>(0, 0) + composed.at<double>(1, 1)) / 2;
-                const double b = (composed.at<double>(1, 0) - composed.at<double>(0, 1)) / 2;
-                result.geometry = geometry_anchor_;
-                result.geometry.matrix = (cv::Mat_<double>(2, 3) << a, -b, composed.at<double>(0, 2), b, a, composed.at<double>(1, 2));
-                result.geometry.timestamp_seconds = timestamp;
-                if (!cv::checkRange(result.geometry.matrix) || !std::isfinite(a * a + b * b) || a * a + b * b <= 1e-16) {
-                    reset();
-                    result.reset_reason = "composed_transform";
-                    result.geometry = {};
-                    result.phase = "rejected";
-                    return result;
-                }
+            // Compose published geometry: geometry_anchor_ (Kongying -> anchor frame) * motion (anchor -> current).
+            const double sx = double(current.cols) / frame.cols, sy = double(current.rows) / frame.rows;
+            cv::Mat scale = (cv::Mat_<double>(3, 3) << sx, 0, 0, 0, sy, 0, 0, 0, 1);
+            cv::Mat inverse = (cv::Mat_<double>(3, 3) << 1 / sx, 0, 0, 0, 1 / sy, 0, 0, 0, 1);
+            cv::Mat motion = cv::Mat::eye(3, 3, CV_64F), anchor = cv::Mat::eye(3, 3, CV_64F);
+            transform.copyTo(motion(cv::Rect(0, 0, 3, 2)));
+            geometry_anchor_.matrix.copyTo(anchor(cv::Rect(0, 0, 3, 2)));
+            cv::Mat composed = inverse * motion * scale * anchor;
+            const double a = (composed.at<double>(0, 0) + composed.at<double>(1, 1)) / 2;
+            const double b = (composed.at<double>(1, 0) - composed.at<double>(0, 1)) / 2;
+            result.geometry = geometry_anchor_;
+            result.geometry.matrix = (cv::Mat_<double>(2, 3) << a, -b, composed.at<double>(0, 2), b, a, composed.at<double>(1, 2));
+            result.geometry.timestamp_seconds = timestamp;
+            if (!cv::checkRange(result.geometry.matrix) || !std::isfinite(a * a + b * b) || a * a + b * b <= 1e-16) {
+                reset();
+                result.reset_reason = "composed_transform";
+                result.geometry = {};
+                result.phase = "rejected";
+                return result;
             }
             return result;
         }
 
-        // Follow failed or appearance changed: do not destroy geometry_anchor_, do not publish.
+        // Follow failed or appearance changed: keep publishing last known geometry so markers
+        // keep moving with the map. Do not destroy geometry_anchor_.
         not_ok_counter_++;
         if (not_ok_counter_ >= MAX_NOT_OK) {
             // Discard anchor but preserve the SIFT cooldown and observation timestamp.
@@ -300,6 +302,11 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
         result.appearance_suspended = true;
         result.suspended_still_frames = suspended_still_frames_;
         result.reset_reason = "follow_failed";
+        // Keep publishing last geometry so markers don't disappear during transient failure.
+        if (!geometry_anchor_.space.empty() && !geometry_anchor_.matrix.empty()) {
+            result.geometry = geometry_anchor_;
+            result.geometry.timestamp_seconds = timestamp;
+        }
         result.phase = movement > 0.6 ? "moving" : "confirming";
         return result;
     }
