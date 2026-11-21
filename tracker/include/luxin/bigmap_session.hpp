@@ -73,6 +73,9 @@ struct BigMapSessionResult {
     int stable_frames = 0;
     bool absolute_throttled = false;
     bool appearance_suspended = false; // internal candidate retained, no geometry output
+    // Experimental motion tolerance: pixel gates (dense/tile change) were skipped on this frame because
+    // the map was measured as moving. Geometry is still from the CURRENT frame vs the absolute anchor.
+    bool appearance_tolerated = false;
     int suspended_still_frames = 0;
     // Scheduling evidence only, fixed settling-origin -> current; never composed/published.
     BigMapFollowStats acquisition_follow;
@@ -143,8 +146,13 @@ private:
     int stable_frames_ = 0;
     bool appearance_suspended_ = false;
     int suspended_still_frames_ = 0;
+    // Timestamp of the last frame whose geometry was measured as moving (accepted or tolerated).
+    // Failures within a short grace after it are blur/duplicates of a pan and do not count as strikes.
+    double last_motion_timestamp_ = -1.0;
 
     // Счётчик последовательных неудач follow перед отказом от анкора.
+    // Failures right after a measured pan are excused (see last_motion_timestamp_); stationary
+    // failures still count strictly.
     int not_ok_counter_ = 0;
     static constexpr int MAX_NOT_OK = 3;
 

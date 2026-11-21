@@ -13,6 +13,12 @@ namespace luxin {
 namespace {
 using Clock = std::chrono::steady_clock;
 
+// Motion tolerance (experimental). A frame is "moving" above kMotionPx of corner travel between
+// consecutive published transforms. After the last measured motion, failures and image-gate misses
+// are still treated as part of the pan for kMotionGraceSeconds (blur, duplicated captures, inertia).
+constexpr double kMotionPx = 0.6;
+constexpr double kMotionGraceSeconds = 1.0;
+
 cv::Mat smallGray(const cv::Mat& frame) {
     cv::Mat gray, small;
     if (frame.type() == CV_8UC3) cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
@@ -242,6 +248,7 @@ void BigMapSession::reset() {
     stable_frames_ = 0;
     appearance_suspended_ = false;
     suspended_still_frames_ = 0;
+    last_motion_timestamp_ = -1.0;
     not_ok_counter_ = 0;
     acquisition_gray_.release();
     acquisition_keypoints_.clear();
@@ -373,13 +380,19 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
             cornerDistance(transform, previous_transform_, current.size()) : 100.0;
         if (movement_measured) result.movement_px = movement;
 
-        const bool appearance_failure = std::strcmp(result.follow.outcome, "dense_change") == 0 ||
-            std::strcmp(result.follow.outcome, "tile_change") == 0 ||
+        // Image-only gates run AFTER the sparse geometry was accepted, so a pixel failure always
+        // carries a valid `transform`. Controls are evaluated last and stay fatal.
+        const bool pixel_failure = std::strcmp(result.follow.outcome, "dense_change") == 0 ||
+            std::strcmp(result.follow.outcome, "tile_change") == 0;
+        const bool appearance_failure = pixel_failure ||
             std::strcmp(result.follow.outcome, "controls_change") == 0;
+        const bool recent_motion = last_motion_timestamp_ >= 0 &&
+            timestamp - last_motion_timestamp_ <= kMotionGraceSeconds;
 
         if (ok && !appearance_failure) {
             // Only a complete follow against the absolute anchor can measure current motion.
             previous_transform_ = transform.clone();
+            if (movement > kMotionPx) last_motion_timestamp_ = timestamp;
             stable_frames_ = movement <= 0.6 ? stable_frames_ + 1 : 0;
             result.movement_px = movement;
             result.stable_frames = stable_frames_;
@@ -408,10 +421,52 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
             return result;
         }
 
+        // Motion tolerance (experimental). During a pan the game redraws tiles, loads detail and the
+        // world edge shimmers, so the pixel gates fail while the sparse geometry is excellent
+        // (logs 19-20 Nov: 480-706 inliers, 0.4-0.75 px error on every rejected moving frame).
+        // Skip ONLY the dense/tile gates, and only when all of this holds: the anchor was confirmed
+        // on stationary frames, the sparse gates above passed in full, the map is measured as moving
+        // (or the last measured motion was < kMotionGraceSeconds ago), and the screen-fixed controls
+        // are unchanged. A stationary frame is judged exactly as before. Phase stays "moving", so a
+        // tolerated frame can never reach "tracking" or confirm an anchor.
+        if (pixel_failure && confirmed_anchor_ && movement_measured &&
+            (movement > kMotionPx || recent_motion) &&
+            controlsUnchanged(anchor_gray_, current, result.follow)) {
+            previous_transform_ = transform.clone();
+            if (movement > kMotionPx) last_motion_timestamp_ = timestamp;
+            stable_frames_ = 0;
+            suspended_still_frames_ = 0;
+            not_ok_counter_ = 0;
+            appearance_suspended_ = false;
+            result.appearance_suspended = false;
+            result.appearance_tolerated = true;
+            result.stable_frames = 0;
+            result.phase = "moving";
+            result.geometry = followed(geometry_anchor_, transform, current.size(), timestamp);
+            if (result.geometry.mode != "found") {
+                reset();
+                result.reset_reason = "composed_transform";
+                result.geometry = {};
+                result.appearance_tolerated = false;
+                result.phase = "rejected";
+                return result;
+            }
+            renewal_can_adopt_ = false;
+            result.measured_motion = true; // confirmed_anchor_ is required above
+            renew(frame, current, refs, result, debug_points);
+            ++snapshot_revision_;
+            return result;
+        }
+
         // A failed follow may retain its private anchor for retry, never current-frame geometry.
-        confirmed_anchor_ = false;
+        // Only a failed image comparison on a geometry-accepted frame casts doubt on the anchor's
+        // appearance; a sparse-match failure is blur/occlusion and says nothing about it.
+        if (appearance_failure) confirmed_anchor_ = false;
         renewal_can_adopt_ = false;
-        not_ok_counter_++;
+        // Right after a measured pan, blur and duplicated captures are expected and do not spend a
+        // strike. Control changes (menu, floor switch) and stationary failures always count.
+        const bool controls_failure = std::strcmp(result.follow.outcome, "controls_change") == 0;
+        if (!(recent_motion && !controls_failure)) not_ok_counter_++;
         if (not_ok_counter_ >= MAX_NOT_OK) {
             renewal_valid_ = false;
             // Discard anchor but preserve the SIFT cooldown and observation timestamp.
@@ -425,6 +480,7 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
             stable_frames_ = 0;
             appearance_suspended_ = false;
             suspended_still_frames_ = 0;
+            last_motion_timestamp_ = -1.0;
             not_ok_counter_ = 0;
             ++snapshot_revision_;
             result.reset_reason = "follow_failed";
@@ -499,6 +555,7 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
     stable_frames_ = 0;
     appearance_suspended_ = false;
     suspended_still_frames_ = 0;
+    last_motion_timestamp_ = -1.0;
     not_ok_counter_ = 0;
     acquisition_gray_.release();
     acquisition_keypoints_.clear();

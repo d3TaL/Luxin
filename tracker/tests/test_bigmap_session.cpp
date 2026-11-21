@@ -16,6 +16,14 @@
 
 using namespace luxin;
 
+// Stays active under NDEBUG (Release builds), unlike assert(); used by the motion-tolerance tests.
+#define REQUIRE(condition) do { \
+    if (!(condition)) { \
+        std::cerr << __func__ << ':' << __LINE__ << ": " #condition "\n"; \
+        std::abort(); \
+    } \
+} while (false)
+
 namespace luxin {
 struct BigMapSessionTestAccess {
     static void awaitRefresh(BigMapSession& session) {
@@ -212,6 +220,114 @@ void testMeasuredPanAndPoints(const cv::Mat& map, const std::shared_ptr<LayerRef
     assert(!lost.measured_motion && lost.geometry.matrix.empty() && lost.follow.debug_points.empty());
 }
 
+// ---- Motion tolerance (experimental stage 1) -------------------------------------------------------
+// Fixture shared with testMeasuredPanAndPoints: the map moves, the screen-fixed panel is painted after.
+cv::Mat stillFrame(const cv::Mat& map) {
+    cv::Mat out = map.clone();
+    out(cv::Rect(1010, 0, 550, 720)).setTo(30);
+    return out;
+}
+
+cv::Mat panFrame(const cv::Mat& map, double dx, double dy) {
+    cv::Mat out;
+    const cv::Mat translation = (cv::Mat_<double>(2, 3) << 1, 0, dx, 0, 1, dy);
+    cv::warpAffine(map, out, translation, map.size());
+    out(cv::Rect(1010, 0, 550, 720)).setTo(30);
+    return out;
+}
+
+// Excellent sparse geometry but one redrawn tile while the map moves (the failure seen in the
+// 19-20 Nov logs): the frame must publish measured motion instead of spending a strike.
+void testPanWithPixelChangeIsTolerated(const cv::Mat& map, const std::shared_ptr<LayerReference>& ref) {
+    const cv::Mat base = stillFrame(map);
+    cv::Mat pan = panFrame(map, 4, 2);
+    pan(cv::Rect(630, 360, 90, 90)).setTo(250);
+    BigMapSession session;
+    acquireSettled(session, base, {ref}, 1.0);
+    session.update(base, {ref}, 1.2);
+    const auto stable = session.update(base, {ref}, 1.4);
+    REQUIRE(stable.phase == "tracking" && !stable.appearance_tolerated);
+
+    const auto moved = session.update(pan, {ref}, 1.6);
+    REQUIRE(std::string(moved.follow.outcome) == "tile_change" && moved.follow.geometry_accepted);
+    REQUIRE(moved.appearance_tolerated && moved.phase == "moving" && moved.measured_motion);
+    REQUIRE(!moved.absolute_attempted && moved.movement_px > 0.6 && moved.stable_frames == 0);
+    REQUIRE(moved.geometry.timestamp_seconds == 1.6 && !moved.geometry.matrix.empty());
+    REQUIRE(std::abs(moved.geometry.matrix.at<double>(0, 2) - stable.geometry.matrix.at<double>(0, 2) - 4) < 1.0);
+
+    // Inside the grace the held picture is still part of the pan (inertia / duplicated capture).
+    REQUIRE(session.update(pan, {ref}, 1.8).appearance_tolerated);
+
+    // After the grace the same picture is judged strictly again: no geometry, three strikes drop the anchor.
+    const auto held1 = session.update(pan, {ref}, 2.8);
+    REQUIRE(!held1.appearance_tolerated && !held1.measured_motion && held1.geometry.matrix.empty());
+    REQUIRE(std::string(held1.follow.outcome) == "tile_change");
+    session.update(pan, {ref}, 2.9);
+    const auto dropped = session.update(pan, {ref}, 3.0);
+    REQUIRE(std::string(dropped.reset_reason) == "follow_failed" && dropped.phase == "acquiring");
+}
+
+// A stationary pixel change is never tolerated, whatever happened earlier.
+void testStillPixelChangeStaysStrict(const cv::Mat& map, const std::shared_ptr<LayerReference>& ref) {
+    const cv::Mat base = stillFrame(map);
+    cv::Mat edited = base.clone();
+    edited(cv::Rect(630, 360, 90, 90)).setTo(250);
+    BigMapSession session;
+    acquireSettled(session, base, {ref}, 1.0);
+    session.update(base, {ref}, 1.2);
+    REQUIRE(session.update(base, {ref}, 1.4).phase == "tracking");
+    for (double t : {1.6, 1.8}) {
+        const auto r = session.update(edited, {ref}, t);
+        REQUIRE(std::string(r.follow.outcome) == "tile_change");
+        REQUIRE(!r.appearance_tolerated && !r.measured_motion && r.geometry.matrix.empty());
+    }
+    const auto third = session.update(edited, {ref}, 2.0);
+    REQUIRE(std::string(third.reset_reason) == "follow_failed" && third.phase == "acquiring");
+}
+
+// Screen-fixed controls changing during a pan (menu, floor switch) stay fatal.
+void testControlsChangeIsNotTolerated(const cv::Mat& map, const std::shared_ptr<LayerReference>& ref) {
+    const cv::Mat base = stillFrame(map);
+    cv::Mat pan = panFrame(map, 4, 2);
+    pan(cv::Rect(630, 360, 90, 90)).setTo(250);
+    pan(cv::Rect(1395, 250, 85, 225)).setTo(200);
+    BigMapSession session;
+    acquireSettled(session, base, {ref}, 1.0);
+    session.update(base, {ref}, 1.2);
+    REQUIRE(session.update(base, {ref}, 1.4).phase == "tracking");
+    const auto r = session.update(pan, {ref}, 1.6);
+    REQUIRE(std::string(r.follow.outcome) == "controls_change");
+    REQUIRE(!r.appearance_tolerated && !r.measured_motion && r.geometry.matrix.empty());
+}
+
+// Blur or duplicated captures right after a measured pan must not drop the anchor; the next good
+// frame resumes measured motion against the SAME anchor. Outside the grace failures count again.
+void testBlurAfterPanKeepsAnchor(const cv::Mat& map, const std::shared_ptr<LayerReference>& ref) {
+    const cv::Mat base = stillFrame(map);
+    BigMapSession session;
+    acquireSettled(session, base, {ref}, 1.0);
+    session.update(base, {ref}, 1.2);
+    const auto stable = session.update(base, {ref}, 1.4);
+    REQUIRE(stable.phase == "tracking");
+    REQUIRE(session.update(panFrame(map, 4, 2), {ref}, 1.6).measured_motion);
+
+    const cv::Mat blank = cv::Mat::zeros(map.size(), map.type());
+    for (double t : {1.7, 1.8, 1.9, 2.0}) { // 4 failures > MAX_NOT_OK, all inside the grace
+        const auto r = session.update(blank, {ref}, t);
+        REQUIRE(r.geometry.matrix.empty() && !r.measured_motion && std::string(r.reset_reason) == "follow_failed");
+        REQUIRE(r.phase != "acquiring");
+    }
+    const auto resumed = session.update(panFrame(map, 8, 4), {ref}, 2.2);
+    REQUIRE(!resumed.absolute_attempted && resumed.phase == "moving" && resumed.measured_motion);
+    REQUIRE(std::abs(resumed.geometry.matrix.at<double>(0, 2) - stable.geometry.matrix.at<double>(0, 2) - 8) < 1.0);
+
+    // Grace expired (last measured motion 2.2): three failures drop the anchor as before.
+    session.update(blank, {ref}, 3.4);
+    session.update(blank, {ref}, 3.5);
+    const auto dropped = session.update(blank, {ref}, 3.6);
+    REQUIRE(std::string(dropped.reset_reason) == "follow_failed" && dropped.phase == "acquiring");
+}
+
 // Stage-2: geometry anchor stays stable across small shifts; follow composes matrix.
 void testAnchorStabilityAcrossMinorShift(const cv::Mat& frame,
     const std::shared_ptr<LayerReference>& ref) {
@@ -405,6 +521,10 @@ int main() {
     testNoRefreshAtCutoff(frame, ref);
     testRenewalDuringStopStart(frame, ref);
     testMeasuredPanAndPoints(frame, ref);
+    testPanWithPixelChangeIsTolerated(frame, ref);
+    testStillPixelChangeStaysStrict(frame, ref);
+    testControlsChangeIsNotTolerated(frame, ref);
+    testBlurAfterPanKeepsAnchor(frame, ref);
 
     std::cout << "big-map stage-2 anchor stability tests passed\n";
     return 0;
