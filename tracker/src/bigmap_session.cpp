@@ -63,7 +63,12 @@ BigMapGeometry followed(const BigMapGeometry& absolute, const cv::Mat& transform
     return result;
 }
 
-bool controlsUnchanged(const cv::Mat& anchor, const cv::Mat& current, BigMapFollowStats& stats) {
+// A control ROI is unchanged if it matches the anchor either where it was (screen-fixed UI) or, when
+// `map_anchor` (the anchor warped by the current transform) is given, where the map moved it. Map
+// content that happens to lie in a ROI therefore does not fail during a pan, while a panel that
+// appears (matches neither) still does. Stationary frames pass no `map_anchor` and are unchanged.
+bool controlsUnchanged(const cv::Mat& anchor, const cv::Mat& current, BigMapFollowStats& stats,
+    const cv::Mat& map_anchor = cv::Mat()) {
     size_t index = 0;
     for (const auto& box : std::vector<cv::Rect>{{2790, 500, 170, 450}, {2020, 540, 120, 350}}) {
         cv::Rect rect(cvRound(box.x * anchor.cols / 3120.0), cvRound(box.y * anchor.rows / 1440.0),
@@ -71,6 +76,11 @@ bool controlsUnchanged(const cv::Mat& anchor, const cv::Mat& current, BigMapFoll
         rect &= cv::Rect(0, 0, anchor.cols, anchor.rows);
         cv::Mat delta;
         cv::absdiff(anchor(rect), current(rect), delta);
+        if (!map_anchor.empty()) {
+            cv::Mat moved_delta;
+            cv::absdiff(map_anchor(rect), current(rect), moved_delta);
+            if (cv::mean(moved_delta)[0] < cv::mean(delta)[0]) delta = moved_delta;
+        }
         auto& control = stats.controls[index++];
         control.rect = rect;
         control.mean_delta = cv::mean(delta)[0];
@@ -429,9 +439,14 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
         // (or the last measured motion was < kMotionGraceSeconds ago), and the screen-fixed controls
         // are unchanged. A stationary frame is judged exactly as before. Phase stays "moving", so a
         // tolerated frame can never reach "tracking" or confirm an anchor.
-        if (pixel_failure && confirmed_anchor_ && movement_measured &&
-            (movement > kMotionPx || recent_motion) &&
-            controlsUnchanged(anchor_gray_, current, result.follow)) {
+        bool tolerate = false;
+        if (pixel_failure && confirmed_anchor_ && movement_measured && (movement > kMotionPx || recent_motion)) {
+            result.follow.pixel_outcome = result.follow.outcome; // controlsUnchanged() may overwrite outcome
+            cv::Mat map_anchor;
+            cv::warpAffine(anchor_gray_, map_anchor, transform, current.size(), cv::INTER_LINEAR);
+            tolerate = controlsUnchanged(anchor_gray_, current, result.follow, map_anchor);
+        }
+        if (tolerate) {
             previous_transform_ = transform.clone();
             if (movement > kMotionPx) last_motion_timestamp_ = timestamp;
             stable_frames_ = 0;

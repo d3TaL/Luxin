@@ -135,13 +135,14 @@ void logBigMapDiagnostics(const luxin::BigMapSessionResult& result,
     LOGI("BigMapFollow stage=%s ts=%.9f outcome=%s work=%dx%d kp=%d/%d desc=%d/%d "
         "matches=%d inliers=%d ratio=%.5f grid=%d errorPx=%.4f scale=%.5f angleDeg=%.4f "
         "hullFrac=%.5f overlap=%d overlapFrac=%.5f denseChanged=%d denseFrac=%.5f "
-        "tilesVisited=%d worstVisitedTile=%d,%d,%d,%d tileChanged=%d tileValid=%d tileFrac=%.5f",
+        "tilesVisited=%d worstVisitedTile=%d,%d,%d,%d tileChanged=%d tileValid=%d tileFrac=%.5f pixelOutcome=%s",
         stage, context.timestamp, f.outcome, f.working_size.width, f.working_size.height,
         f.anchor_keypoints, f.current_keypoints, f.anchor_descriptors, f.current_descriptors,
         f.matches, f.inliers, f.inlier_ratio, f.grid_cells, f.mean_error_px, f.scale, f.angle_degrees,
         f.hull_fraction, f.overlap_pixels, f.overlap_fraction, f.changed_pixels, f.changed_fraction,
         f.tiles_evaluated, f.worst_tile.x, f.worst_tile.y, f.worst_tile.width, f.worst_tile.height,
-        f.worst_tile_changed_pixels, f.worst_tile_valid_pixels, f.worst_tile_changed_fraction);
+        f.worst_tile_changed_pixels, f.worst_tile_valid_pixels, f.worst_tile_changed_fraction,
+        f.pixel_outcome);
     for (size_t i = 0; i < f.controls.size(); ++i) {
         const auto& c = f.controls[i];
         LOGI("BigMapControl stage=%s ts=%.9f roi=%d rect=%d,%d,%d,%d mean=%.4f changed=%d pixels=%d frac=%.5f",

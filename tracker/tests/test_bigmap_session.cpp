@@ -222,17 +222,29 @@ void testMeasuredPanAndPoints(const cv::Mat& map, const std::shared_ptr<LayerRef
 
 // ---- Motion tolerance (experimental stage 1) -------------------------------------------------------
 // Fixture shared with testMeasuredPanAndPoints: the map moves, the screen-fixed panel is painted after.
-cv::Mat stillFrame(const cv::Mat& map) {
+// `panel_x` is where the screen-fixed panel starts; 1075 leaves control ROI 1 (x 1010..1070) as map.
+cv::Mat stillFrame(const cv::Mat& map, int panel_x = 1010) {
     cv::Mat out = map.clone();
-    out(cv::Rect(1010, 0, 550, 720)).setTo(30);
+    out(cv::Rect(panel_x, 0, 1560 - panel_x, 720)).setTo(30);
     return out;
 }
 
-cv::Mat panFrame(const cv::Mat& map, double dx, double dy) {
+cv::Mat panFrame(const cv::Mat& map, double dx, double dy, int panel_x = 1010) {
     cv::Mat out;
     const cv::Mat translation = (cv::Mat_<double>(2, 3) << 1, 0, dx, 0, 1, dy);
     cv::warpAffine(map, out, translation, map.size());
-    out(cv::Rect(1010, 0, 550, 720)).setTo(30);
+    out(cv::Rect(panel_x, 0, 1560 - panel_x, 720)).setTo(30);
+    return out;
+}
+
+// Map whose texture (not a flat patch) lies under control ROI 1, as in the 21 Nov log.
+cv::Mat mapWithTextureInRoi1(const cv::Mat& map) {
+    cv::Mat out = map.clone();
+    cv::Mat noise(200, 110, CV_8UC1);
+    cv::RNG rng(5);
+    rng.fill(noise, cv::RNG::UNIFORM, 40, 220);
+    cv::GaussianBlur(noise, noise, cv::Size(5, 5), 1);
+    noise.copyTo(out(cv::Rect(990, 260, 110, 200)));
     return out;
 }
 
@@ -298,6 +310,34 @@ void testControlsChangeIsNotTolerated(const cv::Mat& map, const std::shared_ptr<
     const auto r = session.update(pan, {ref}, 1.6);
     REQUIRE(std::string(r.follow.outcome) == "controls_change");
     REQUIRE(!r.appearance_tolerated && !r.measured_motion && r.geometry.matrix.empty());
+}
+
+// 21 Nov log: control ROI 1 showed MAP content, so it changed with every pan and blocked tolerance
+// (mean delta 15-18 at rest 0). Map-anchored comparison passes it; a panel that appears still fails.
+void testMapContentInControlRoiDoesNotBlockPan(const cv::Mat& map, const std::shared_ptr<LayerReference>& ref) {
+    const cv::Mat textured = mapWithTextureInRoi1(map);
+    const cv::Mat base = stillFrame(textured, 1075);
+    cv::Mat pan = panFrame(textured, 4, 2, 1075);
+    pan(cv::Rect(630, 360, 90, 90)).setTo(250);
+    BigMapSession session;
+    acquireSettled(session, base, {ref}, 1.0);
+    session.update(base, {ref}, 1.2);
+    REQUIRE(session.update(base, {ref}, 1.4).phase == "tracking");
+    const auto moved = session.update(pan, {ref}, 1.6);
+    REQUIRE(moved.appearance_tolerated && moved.measured_motion && moved.phase == "moving");
+    REQUIRE(std::string(moved.follow.pixel_outcome) == "tile_change");
+    REQUIRE(moved.follow.controls[1].mean_delta < 6.0); // matched the warped anchor, not the fixed one
+
+    // The same pan with a real panel opening over ROI 1 stays fatal, and telemetry keeps the first failure.
+    BigMapSession blocked;
+    acquireSettled(blocked, base, {ref}, 1.0);
+    blocked.update(base, {ref}, 1.2);
+    REQUIRE(blocked.update(base, {ref}, 1.4).phase == "tracking");
+    pan(cv::Rect(1010, 270, 60, 175)).setTo(200);
+    const auto panel = blocked.update(pan, {ref}, 1.6);
+    REQUIRE(std::string(panel.follow.outcome) == "controls_change");
+    REQUIRE(std::string(panel.follow.pixel_outcome) == "tile_change");
+    REQUIRE(!panel.appearance_tolerated && !panel.measured_motion && panel.geometry.matrix.empty());
 }
 
 // Blur or duplicated captures right after a measured pan must not drop the anchor; the next good
@@ -525,6 +565,7 @@ int main() {
     testStillPixelChangeStaysStrict(frame, ref);
     testControlsChangeIsNotTolerated(frame, ref);
     testBlurAfterPanKeepsAnchor(frame, ref);
+    testMapContentInControlRoiDoesNotBlockPan(frame, ref);
 
     std::cout << "big-map stage-2 anchor stability tests passed\n";
     return 0;

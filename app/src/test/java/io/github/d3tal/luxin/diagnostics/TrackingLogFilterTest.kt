@@ -43,6 +43,18 @@ class TrackingLogFilterTest {
     }
 
     @Test
+    fun preservesPixelOutcomeOfToleratedFollowButOnlyKnownValues() {
+        val follow = TrackingLogFilter.sanitize(native("BigMapFollow stage=return outcome=controls_change " +
+            "denseFrac=0.03 pixelOutcome=tile_change"), pid)!!
+        assertTrue(follow.contains("outcome=controls_change") && follow.contains("pixelOutcome=tile_change"))
+        assertTrue(TrackingLogFilter.sanitize(native("BigMapFollow stage=return outcome=accepted pixelOutcome=none"), pid)!!
+            .contains("pixelOutcome=none"))
+        val unknown = TrackingLogFilter.sanitize(native("BigMapFollow stage=return outcome=accepted " +
+            "pixelOutcome=/data/private"), pid)!!
+        assertFalse(unknown.contains("pixelOutcome"))
+    }
+
+    @Test
     fun dropsPathsUidCoordinatesRawJsonAndArbitraryMessages() {
         val filtered = TrackingLogFilter.sanitize(native("BigMap stage=return ts=12.5 " +
             "path=/storage/emulated/0/private.png uid=123456789 x=-1000 y=2000 " +

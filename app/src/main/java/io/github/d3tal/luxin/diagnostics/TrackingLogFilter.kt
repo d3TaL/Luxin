@@ -31,7 +31,7 @@ internal object TrackingLogFilter {
     )
     private val booleanKeys = setOf("visibility", "resetBigMap", "resetAll", "obsolete", "blocked", "geometry")
     private val enumKeys = setOf("stage", "phase", "mode", "reset", "reason", "follow", "settle",
-        "outcome", "refresh", "waiting", "screen", "lifecycle", "invalidate")
+        "outcome", "pixelOutcome", "refresh", "waiting", "screen", "lifecycle", "invalidate")
     private val enumValues = setOf(
         "none", "begin", "before_absolute", "return", "native_return", "checked", "publish",
         "publish_dropped", "error", "reset", "tracking", "confirming", "moving", "acquiring",

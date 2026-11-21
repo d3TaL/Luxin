@@ -22,6 +22,9 @@ struct BigMapControlStats {
 
 struct BigMapFollowStats {
     const char* outcome = "not_attempted"; // accepted, or the FIRST failed gate
+    // dense_change/tile_change that was the first failure when the motion-tolerance control check
+    // then ran (and possibly replaced `outcome` with controls_change); "none" otherwise.
+    const char* pixel_outcome = "none";
     cv::Size working_size;
     int anchor_keypoints = -1;
     int current_keypoints = -1;
