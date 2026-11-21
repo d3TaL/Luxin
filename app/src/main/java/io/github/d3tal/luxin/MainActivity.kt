@@ -73,6 +73,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.d3tal.luxin.capture.CaptureResult
 import io.github.d3tal.luxin.capture.CaptureService
 import io.github.d3tal.luxin.data.KongyingSyncManager
+import io.github.d3tal.luxin.diagnostics.DiagnosticLogExportCard
 import io.github.d3tal.luxin.overlay.OverlayService
 import io.github.d3tal.luxin.tracker.NativeSplitTracker
 import io.github.d3tal.luxin.tracker.ReferencePackStore
@@ -341,6 +342,8 @@ fun CaptureSpikeScreen() {
                     style = MaterialTheme.typography.bodySmall)
             }
         }
+
+        DiagnosticLogExportCard()
 
         // Card 2: Overlay Permission & Control
         Card(
