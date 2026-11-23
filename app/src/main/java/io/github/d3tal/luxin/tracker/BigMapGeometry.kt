@@ -70,6 +70,24 @@ data class BigMapGeometry(
         return Pair(px, py)
     }
 
+    /** Captured frame pixels per Kongying unit (the matrix is a similarity, so this is its uniform scale). */
+    val frameScale: Double get() = sqrt(matrix[0] * matrix[4] - matrix[1] * matrix[3])
+
+    /**
+     * Inverse of [project]: captured frame pixels -> Kongying units. Used by the diagnostic test
+     * marker to pin a world coordinate under a chosen frame point.
+     */
+    fun unproject(frameX: Double, frameY: Double): Pair<Double, Double> {
+        require(frameX.isFinite() && frameY.isFinite()) { "Frame coordinates must be finite: ($frameX, $frameY)" }
+        val det = matrix[0] * matrix[4] - matrix[1] * matrix[3]
+        val dx = frameX - matrix[2]
+        val dy = frameY - matrix[5]
+        val x = (matrix[4] * dx - matrix[1] * dy) / det
+        val y = (-matrix[3] * dx + matrix[0] * dy) / det
+        require(x.isFinite() && y.isFinite()) { "Kongying coordinates must be finite: ($x, $y)" }
+        return Pair(x, y)
+    }
+
     /**
      * Projects Kongying marker coordinates (x, y) into display screen pixels.
      * Requires positive display dimensions and aspect ratio matching the captured frame within 0.04.

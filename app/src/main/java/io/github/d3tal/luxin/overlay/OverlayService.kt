@@ -25,6 +25,7 @@ import android.widget.TextView
 import io.github.d3tal.luxin.capture.CaptureService
 import io.github.d3tal.luxin.tracker.BigMapMarkerFilter
 import io.github.d3tal.luxin.tracker.BigMapMarkerOverlay
+import io.github.d3tal.luxin.tracker.BigMapTestInfo
 import io.github.d3tal.luxin.tracker.LiveTrackingState
 import io.github.d3tal.luxin.tracker.LiveTrackingStatus
 import io.github.d3tal.luxin.tracker.formatTrackingHud
@@ -74,6 +75,9 @@ class OverlayService : Service() {
         private val _isShowing = MutableStateFlow(false)
         val isShowing: StateFlow<Boolean> = _isShowing.asStateFlow()
         @Volatile var showTrackingPoints = false
+            private set
+        /** Diagnostic: world-anchored test marker + Kongying grid drawn from the published big-map geometry. */
+        @Volatile var showTestGrid = false
             private set
 
         fun start(context: Context) {
@@ -277,13 +281,17 @@ class OverlayService : Service() {
             val markers = if (g != null && layer != null) BigMapMarkerFilter.filterMarkersForBigMap(
                 g.space, layer, s.frameWidth, s.frameHeight, g) else emptyList()
             val points = showTrackingPoints && s.screenMode == "big_map" && g != null && g.framePoints.isNotEmpty()
+            // The test layer is independent of the floor decision and of item markers, and stays visible
+            // (as a status badge) while the tracker publishes no geometry.
+            val test = showTestGrid && s.screenMode == "big_map"
+            overlay.setTest(if (test) BigMapTestInfo(g, s.bigMapGeometryMode, s.frameAgeMs, s.actualFps,
+                System.nanoTime() / 1_000_000_000.0) else null)
             if (g != null && (points || markers.isNotEmpty())) {
                 overlay.setMarkers(markers, g, points)
-                overlay.visibility = View.VISIBLE
             } else {
-                overlay.visibility = View.INVISIBLE
                 overlay.clear()
             }
+            overlay.visibility = if (test || (g != null && (points || markers.isNotEmpty()))) View.VISIBLE else View.INVISIBLE
         }
         val debugButton = hudButton("Точки трекинга: выкл") { }.apply {
             setOnClickListener {
@@ -291,6 +299,19 @@ class OverlayService : Service() {
                 text = if (showTrackingPoints) "Точки трекинга: вкл" else "Точки трекинга: выкл"
                 renderMap(LiveTrackingStatus.state.value)
             }
+        }
+
+        val testGridButton = hudButton("Тест-метка и сетка: выкл") { }.apply {
+            setOnClickListener {
+                showTestGrid = !showTestGrid
+                text = if (showTestGrid) "Тест-метка и сетка: вкл" else "Тест-метка и сетка: выкл"
+                if (!showTestGrid) bigMapMarkerOverlay?.resetTestPin()
+                renderMap(LiveTrackingStatus.state.value)
+            }
+        }
+        val testPinButton = hudButton("Тест-метку в центр") {
+            bigMapMarkerOverlay?.resetTestPin()
+            renderMap(LiveTrackingStatus.state.value)
         }
 
         val snapButton = hudButton("📸 Снимок (обычный)") {
@@ -342,6 +363,8 @@ class OverlayService : Service() {
             addView(trackingText)
             addView(trackButton)
             addView(debugButton)
+            addView(testGridButton)
+            addView(testPinButton)
             addView(statusText)
             addView(calText)
             addView(hudButton("Настроить кольцо / Готово") {
@@ -482,6 +505,7 @@ class OverlayService : Service() {
 
     private fun hideOverlay() {
         showTrackingPoints = false
+        showTestGrid = false
         markerOverlayView?.let { view ->
             try {
                 windowManager?.removeView(view)

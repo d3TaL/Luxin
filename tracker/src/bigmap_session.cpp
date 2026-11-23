@@ -18,6 +18,13 @@ using Clock = std::chrono::steady_clock;
 // are still treated as part of the pan for kMotionGraceSeconds (blur, duplicated captures, inertia).
 constexpr double kMotionPx = 0.6;
 constexpr double kMotionGraceSeconds = 1.0;
+// Control ROIs. A stationary map is judged with kControlMeanLimit. Once the map is displaced from the
+// anchor by more than kControlShiftPx, the ROI is compared with the map-warped anchor as well and the
+// mean limit is kControlMeanLimitMoving: blur and resampling of map content under a pan give a mean of
+// 6.6-7 with ~1% changed pixels (log 21 Nov 15:05), while a real panel gives 70-160 with 100% changed.
+constexpr double kControlMeanLimit = 6.0;
+constexpr double kControlMeanLimitMoving = 12.0;
+constexpr double kControlShiftPx = 1.0;
 
 cv::Mat smallGray(const cv::Mat& frame) {
     cv::Mat gray, small;
@@ -68,7 +75,7 @@ BigMapGeometry followed(const BigMapGeometry& absolute, const cv::Mat& transform
 // content that happens to lie in a ROI therefore does not fail during a pan, while a panel that
 // appears (matches neither) still does. Stationary frames pass no `map_anchor` and are unchanged.
 bool controlsUnchanged(const cv::Mat& anchor, const cv::Mat& current, BigMapFollowStats& stats,
-    const cv::Mat& map_anchor = cv::Mat()) {
+    const cv::Mat& map_anchor = cv::Mat(), double mean_limit = kControlMeanLimit) {
     size_t index = 0;
     for (const auto& box : std::vector<cv::Rect>{{2790, 500, 170, 450}, {2020, 540, 120, 350}}) {
         cv::Rect rect(cvRound(box.x * anchor.cols / 3120.0), cvRound(box.y * anchor.rows / 1440.0),
@@ -87,7 +94,7 @@ bool controlsUnchanged(const cv::Mat& anchor, const cv::Mat& current, BigMapFoll
         control.changed_pixels = cv::countNonZero(delta > 24);
         control.pixels = static_cast<int>(delta.total());
         if (control.pixels > 0) control.changed_fraction = double(control.changed_pixels) / control.pixels;
-        if (control.mean_delta > 6.0 || control.changed_pixels > delta.total() * 0.04) {
+        if (control.mean_delta > mean_limit || control.changed_pixels > delta.total() * 0.04) {
             stats.outcome = "controls_change";
             return false;
         }
@@ -95,9 +102,17 @@ bool controlsUnchanged(const cv::Mat& anchor, const cv::Mat& current, BigMapFoll
     return true;
 }
 
+// Is the map displaced from the anchor far enough that screen-fixed ROIs may show shifted map content?
+bool displacedFromAnchor(const cv::Mat& transform, cv::Size size) {
+    const cv::Mat identity = (cv::Mat_<double>(2, 3) << 1, 0, 0, 0, 1, 0);
+    return cornerDistance(transform, identity, size) > kControlShiftPx;
+}
+
+// `map_aware_controls` is set only for the published track-anchor follow. Acquisition-settling and renewal
+// follows keep the strict stationary ROI rule.
 bool follow(const cv::Mat& anchor, const std::vector<cv::KeyPoint>& anchor_points,
     const cv::Mat& anchor_descriptors, const cv::Mat& current, cv::Mat& transform, BigMapFollowStats& stats,
-    bool debug_points = false) {
+    bool debug_points = false, bool map_aware_controls = false) {
     const auto reject = [&stats](const char* reason) { stats.outcome = reason; return false; };
     stats.working_size = current.size();
     stats.anchor_keypoints = static_cast<int>(anchor_points.size());
@@ -187,7 +202,9 @@ bool follow(const cv::Mat& anchor, const std::vector<cv::KeyPoint>& anchor_point
             }
         }
     }
-    if (!controlsUnchanged(anchor, current, stats)) return false;
+    const bool displaced = map_aware_controls && displacedFromAnchor(transform, current.size());
+    if (!controlsUnchanged(anchor, current, stats, displaced ? warped : cv::Mat(),
+            displaced ? kControlMeanLimitMoving : kControlMeanLimit)) return false;
     stats.outcome = "accepted";
     if (debug_points) {
         std::array<bool, 8 * 6> sampled{};
@@ -383,7 +400,7 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
         const auto start = Clock::now();
         cv::Mat transform;
         const bool ok = follow(anchor_gray_, anchor_keypoints_, anchor_descriptors_,
-            current, transform, result.follow, debug_points);
+            current, transform, result.follow, debug_points, /*map_aware_controls=*/true);
         result.follow_ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
         const bool movement_measured = result.follow.geometry_accepted && !previous_transform_.empty();
         const double movement = movement_measured ?
@@ -444,7 +461,8 @@ BigMapSessionResult BigMapSession::update(const cv::Mat& frame,
             result.follow.pixel_outcome = result.follow.outcome; // controlsUnchanged() may overwrite outcome
             cv::Mat map_anchor;
             cv::warpAffine(anchor_gray_, map_anchor, transform, current.size(), cv::INTER_LINEAR);
-            tolerate = controlsUnchanged(anchor_gray_, current, result.follow, map_anchor);
+            tolerate = controlsUnchanged(anchor_gray_, current, result.follow, map_anchor,
+                displacedFromAnchor(transform, current.size()) ? kControlMeanLimitMoving : kControlMeanLimit);
         }
         if (tolerate) {
             previous_transform_ = transform.clone();

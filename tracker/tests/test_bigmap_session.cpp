@@ -8,6 +8,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -340,6 +341,76 @@ void testMapContentInControlRoiDoesNotBlockPan(const cv::Mat& map, const std::sh
     REQUIRE(!panel.appearance_tolerated && !panel.measured_motion && panel.geometry.matrix.empty());
 }
 
+// ---- v3: screen-fixed control ROIs while the map is displaced from the anchor -----------------------
+// Gaussian noise (sigma in gray levels) inside one rectangle: low-contrast mismatch such as blur and
+// resampling of map content, not a structural change.
+void addNoise(cv::Mat& image, cv::Rect rect, double sigma, uint64_t seed) {
+    cv::Mat noise(rect.size(), CV_16SC1), region;
+    cv::RNG rng(seed);
+    rng.fill(noise, cv::RNG::NORMAL, 0, sigma);
+    cv::Mat view = image(rect);
+    view.convertTo(region, CV_16SC1);
+    region += noise;
+    region.convertTo(view, CV_8UC1); // saturates
+}
+
+// 21 Nov 15:05 log: the pixel gates PASSED (no redrawn tile) but ROI 1 showed map content, so the fixed
+// comparison gave mean 18.5 / 24.5% changed and the pan was rejected as controls_change (pixelOutcome=none).
+// The ROI check inside follow() must also accept a match with the map-warped anchor.
+void testPanControlRoiFollowsMap(const cv::Mat& map, const std::shared_ptr<LayerReference>& ref) {
+    const cv::Mat textured = mapWithTextureInRoi1(map);
+    const cv::Mat base = stillFrame(textured, 1075);
+    cv::Mat pan = panFrame(textured, 4, 2, 1075);
+    BigMapSession session;
+    acquireSettled(session, base, {ref}, 1.0);
+    session.update(base, {ref}, 1.2);
+    REQUIRE(session.update(base, {ref}, 1.4).phase == "tracking");
+    const auto moved = session.update(pan, {ref}, 1.6);
+    REQUIRE(std::string(moved.follow.outcome) == "accepted" && moved.phase == "moving" && moved.measured_motion);
+    REQUIRE(!moved.appearance_tolerated); // ordinary accepted frame: no pixel gate was skipped
+    REQUIRE(moved.follow.controls[1].mean_delta < 6.0);
+
+    // A real panel opening over ROI 1 during the same pan stays fatal.
+    BigMapSession blocked;
+    acquireSettled(blocked, base, {ref}, 1.0);
+    blocked.update(base, {ref}, 1.2);
+    REQUIRE(blocked.update(base, {ref}, 1.4).phase == "tracking");
+    pan(cv::Rect(1010, 270, 60, 175)).setTo(200);
+    const auto panel = blocked.update(pan, {ref}, 1.6);
+    REQUIRE(std::string(panel.follow.outcome) == "controls_change");
+    REQUIRE(!panel.appearance_tolerated && !panel.measured_motion && panel.geometry.matrix.empty());
+}
+
+// 21 Nov 15:05 log: blur of map content under a pan gave ROI mean 6.6-6.9 with ~1% changed pixels, just
+// over the stationary limit of 6, and one such frame cost the whole swipe. While the map is displaced from
+// the anchor the mean limit is 12; the same drift on a stationary map stays rejected.
+void testMildControlDriftDuringPanIsAccepted(const cv::Mat& map, const std::shared_ptr<LayerReference>& ref) {
+    const cv::Mat base = stillFrame(map);
+    cv::Mat pan = panFrame(map, 4, 2);
+    cv::Mat still = base.clone();
+    for (cv::Mat* frame : {&pan, &still}) {
+        addNoise(*frame, cv::Rect(1395, 250, 85, 225), 10.0, 11);
+        addNoise(*frame, cv::Rect(1010, 270, 60, 175), 10.0, 12);
+    }
+    BigMapSession session;
+    acquireSettled(session, base, {ref}, 1.0);
+    session.update(base, {ref}, 1.2);
+    REQUIRE(session.update(base, {ref}, 1.4).phase == "tracking");
+    const auto moved = session.update(pan, {ref}, 1.6);
+    REQUIRE(std::string(moved.follow.outcome) == "accepted" && moved.phase == "moving" && moved.measured_motion);
+    for (const auto& control : moved.follow.controls) { // proves the relaxed limit was what let it through
+        REQUIRE(control.mean_delta > 6.0 && control.mean_delta < 12.0 && control.changed_fraction < 0.04);
+    }
+
+    BigMapSession stationary;
+    acquireSettled(stationary, base, {ref}, 1.0);
+    stationary.update(base, {ref}, 1.2);
+    REQUIRE(stationary.update(base, {ref}, 1.4).phase == "tracking");
+    const auto r = stationary.update(still, {ref}, 1.6);
+    REQUIRE(std::string(r.follow.outcome) == "controls_change");
+    REQUIRE(!r.measured_motion && r.geometry.matrix.empty());
+}
+
 // Blur or duplicated captures right after a measured pan must not drop the anchor; the next good
 // frame resumes measured motion against the SAME anchor. Outside the grace failures count again.
 void testBlurAfterPanKeepsAnchor(const cv::Mat& map, const std::shared_ptr<LayerReference>& ref) {
@@ -566,6 +637,8 @@ int main() {
     testControlsChangeIsNotTolerated(frame, ref);
     testBlurAfterPanKeepsAnchor(frame, ref);
     testMapContentInControlRoiDoesNotBlockPan(frame, ref);
+    testPanControlRoiFollowsMap(frame, ref);
+    testMildControlDriftDuringPanIsAccepted(frame, ref);
 
     std::cout << "big-map stage-2 anchor stability tests passed\n";
     return 0;
