@@ -41,4 +41,14 @@ class RgbaPlaneTest {
     @Test(expected = IllegalArgumentException::class) fun invalidStrideIsRejected() {
         RgbaPlane.copyTight(ByteBuffer.allocate(32), 2, 2, 7, 4)
     }
+
+    @Test fun copyTightIntoReusesBufferWithoutReallocation() {
+        val data1 = ByteArray(20) { it.toByte() }
+        val data2 = ByteArray(20) { (it + 50).toByte() }
+        val reusable = ByteBuffer.allocate(16)
+        RgbaPlane.copyTightInto(ByteBuffer.wrap(data1), reusable, 2, 2, 12, 4)
+        assertArrayEquals(data1.sliceArray(0..7) + data1.sliceArray(12..19), reusable.bytes())
+        RgbaPlane.copyTightInto(ByteBuffer.wrap(data2), reusable, 2, 2, 12, 4)
+        assertArrayEquals(data2.sliceArray(0..7) + data2.sliceArray(12..19), reusable.bytes())
+    }
 }

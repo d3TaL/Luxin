@@ -17,12 +17,18 @@ import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
 import android.util.AtomicFile
 import android.util.Log
 import android.view.WindowManager
+import io.github.d3tal.luxin.diagnostics.BigMapFrameDumpState
+import io.github.d3tal.luxin.diagnostics.BigMapFrameDumpStatus
+import io.github.d3tal.luxin.diagnostics.BigMapFrameDumper
+import io.github.d3tal.luxin.diagnostics.DumpPhase
+import io.github.d3tal.luxin.diagnostics.DumpStopReason
 import io.github.d3tal.luxin.overlay.MinimapCalibrationStore
 import io.github.d3tal.luxin.overlay.OverlayService
 import io.github.d3tal.luxin.overlay.RingCalibration
@@ -96,6 +102,20 @@ class CaptureService : Service() {
     private var readerWidth = 0
     private var readerHeight = 0
     private var generation = 0L
+    // Only accessed under imageLock; used when diagnostic burst dump shares ImageReader.
+    private var frameDumper: BigMapFrameDumper? = null
+    private var dumpHandlerThread: HandlerThread? = null
+    private var dumpHandler: Handler? = null
+    // Lazy ping-pong full-res buffers for readFreshPixels() during burst capture (0 bytes if tracker is off).
+    private var trackerActiveDuringBurst = false
+    private var trackerBuffers: Array<ByteBuffer>? = null
+    private var trackerBufferWidth = 0
+    private var trackerBufferHeight = 0
+    private var trackerLastHandedIdx = 0
+    private var trackerReadyIdx = -1
+    private var trackerReadyTimestampNs = 0L
+    private var trackerReadyGeneration = 0L
+    private var trackerLastCopyMs = 0L
     private var stopping = false
     private var receivedContentSize = false
     @Volatile private var capturedContentVisible = true
@@ -138,6 +158,8 @@ class CaptureService : Service() {
         const val ACTION_TAKE_SNAPSHOT = "io.github.d3tal.luxin.capture.ACTION_TAKE_SNAPSHOT"
         const val ACTION_TRACK_START = "io.github.d3tal.luxin.capture.ACTION_TRACK_START"
         const val ACTION_TRACK_STOP = "io.github.d3tal.luxin.capture.ACTION_TRACK_STOP"
+        const val ACTION_DUMP_START = "io.github.d3tal.luxin.capture.ACTION_DUMP_START"
+        const val ACTION_DUMP_STOP = "io.github.d3tal.luxin.capture.ACTION_DUMP_STOP"
         const val EXTRA_RESULT_CODE = "extra_result_code"
         const val EXTRA_RESULT_DATA = "extra_result_data"
         const val EXTRA_HIDE_OVERLAY = "extra_hide_overlay"
@@ -166,6 +188,14 @@ class CaptureService : Service() {
 
         fun stopTracking(context: Context) {
             context.startService(Intent(context, CaptureService::class.java).apply { action = ACTION_TRACK_STOP })
+        }
+
+        fun startFrameDump(context: Context) {
+            context.startService(Intent(context, CaptureService::class.java).apply { action = ACTION_DUMP_START })
+        }
+
+        fun stopFrameDump(context: Context) {
+            context.startService(Intent(context, CaptureService::class.java).apply { action = ACTION_DUMP_STOP })
         }
 
         fun takeSnapshot(context: Context, hideOverlayDuringCapture: Boolean = false) {
@@ -204,6 +234,18 @@ class CaptureService : Service() {
             }
             ACTION_TRACK_STOP -> {
                 stopLiveTracking()
+                if (!_isRunning.value) stopSelf()
+            }
+            ACTION_DUMP_START -> {
+                if (_isRunning.value) startFrameDump() else {
+                    BigMapFrameDumpStatus.publish(
+                        BigMapFrameDumpState(phase = DumpPhase.ERROR, error = "Сначала запустите захват экрана")
+                    )
+                    stopSelf()
+                }
+            }
+            ACTION_DUMP_STOP -> {
+                stopFrameDump(DumpStopReason.USER)
                 if (!_isRunning.value) stopSelf()
             }
             ACTION_TAKE_SNAPSHOT -> {
@@ -268,9 +310,16 @@ class CaptureService : Service() {
                 throw e
             }
             val old = imageReader
+            old?.setOnImageAvailableListener(null, null)
             imageReader = replacement
             readerWidth = width
             readerHeight = height
+            clearTrackerBurstBuffersLocked()
+            val activeDumper = frameDumper
+            if (activeDumper != null && activeDumper.isCapturing()) {
+                // Keep every burst geometrically uniform: end capture and encode frames captured so far.
+                activeDumper.stop(DumpStopReason.RESIZE)
+            }
             generation++
             old?.close()
             trackingRevision++
@@ -303,17 +352,118 @@ class CaptureService : Service() {
     private data class Pixels(val width: Int, val height: Int, val bytes: ByteBuffer,
                               val timestampNs: Long, val generation: Long)
 
-    private fun readFreshPixels(afterNs: Long): Pixels? = synchronized(imageLock) {
-        val image = imageReader?.acquireLatestImage() ?: return@synchronized null
-        try {
-            if (image.timestamp <= afterNs) return@synchronized null
-            val crop = image.cropRect
-            val plane = image.planes[0]
-            Pixels(crop.width(), crop.height(), RgbaPlane.copyTight(plane.buffer, crop.width(), crop.height(),
-                plane.rowStride, plane.pixelStride, crop.left, crop.top), image.timestamp, generation)
-        } finally {
-            image.close()
+    // Live tracker coexistence during burst capture:
+    // While the burst is off (or in countdown/encoding), no listener is attached and
+    // readFreshPixels() executes its untouched direct acquireLatestImage() path.
+    // Only during the short RAM CAPTURING phase does this listener drain ImageReader on a
+    // dedicated HandlerThread and write 720p frames directly into preallocated direct ByteBuffers
+    // via OpenCV (zero per-frame heap allocation, no PNG encoding). If live tracking is also
+    // active, readFreshPixels() is served from a lazy ping-pong pair of reusable full-res buffers
+    // updated in-place via RgbaPlane.copyTightInto at <=20 Hz (never overwriting the buffer the
+    // tracker is reading, and allocating 0 bytes when live tracking is off).
+    private val dumpImageListener = ImageReader.OnImageAvailableListener { reader ->
+        synchronized(imageLock) {
+            if (reader !== imageReader) return@synchronized
+            val dumper = frameDumper
+            if (dumper == null || !dumper.isCapturing()) return@synchronized
+            var latest = reader.acquireNextImage() ?: return@synchronized
+            var skipped = 0
+            try {
+                while (true) {
+                    val newer = reader.acquireNextImage() ?: break
+                    latest.close()
+                    latest = newer
+                    skipped++
+                }
+                dumper.captureFrameFromImage(
+                    image = latest,
+                    generation = generation,
+                    screenMode = LiveTrackingStatus.state.value.screenMode,
+                    droppedBefore = skipped
+                )
+                if (trackerActiveDuringBurst) {
+                    val nowMs = SystemClock.elapsedRealtime()
+                    if (trackerReadyIdx < 0 || nowMs - trackerLastCopyMs >= 50L) {
+                        val crop = latest.cropRect
+                        val plane = latest.planes[0]
+                        val buffers = ensureTrackerBuffersLocked(crop.width(), crop.height())
+                        val writeIdx = 1 - trackerLastHandedIdx
+                        RgbaPlane.copyTightInto(
+                            plane.buffer,
+                            buffers[writeIdx],
+                            crop.width(),
+                            crop.height(),
+                            plane.rowStride,
+                            plane.pixelStride,
+                            crop.left,
+                            crop.top
+                        )
+                        trackerReadyIdx = writeIdx
+                        trackerReadyTimestampNs = latest.timestamp
+                        trackerReadyGeneration = generation
+                        trackerLastCopyMs = nowMs
+                    }
+                }
+            } finally {
+                latest.close()
+            }
         }
+    }
+
+    private fun ensureTrackerBuffersLocked(width: Int, height: Int): Array<ByteBuffer> {
+        val existing = trackerBuffers
+        if (existing != null && trackerBufferWidth == width && trackerBufferHeight == height) {
+            return existing
+        }
+        val bytes = Math.multiplyExact(Math.multiplyExact(width, height), 4)
+        val created = arrayOf(ByteBuffer.allocate(bytes), ByteBuffer.allocate(bytes))
+        trackerBuffers = created
+        trackerBufferWidth = width
+        trackerBufferHeight = height
+        trackerReadyIdx = -1
+        return created
+    }
+
+    private fun clearTrackerBurstBuffersLocked() {
+        trackerActiveDuringBurst = false
+        trackerBuffers = null
+        trackerBufferWidth = 0
+        trackerBufferHeight = 0
+        trackerReadyIdx = -1
+        trackerReadyTimestampNs = 0L
+        trackerReadyGeneration = 0L
+        trackerLastCopyMs = 0L
+    }
+
+    private fun readFreshPixels(afterNs: Long): Pixels? = synchronized(imageLock) {
+        val dumper = frameDumper
+        if (dumper == null || !dumper.isCapturing()) {
+            val image = imageReader?.acquireLatestImage() ?: return@synchronized null
+            try {
+                if (image.timestamp <= afterNs) return@synchronized null
+                val crop = image.cropRect
+                val plane = image.planes[0]
+                return@synchronized Pixels(crop.width(), crop.height(), RgbaPlane.copyTight(plane.buffer, crop.width(), crop.height(),
+                    plane.rowStride, plane.pixelStride, crop.left, crop.top), image.timestamp, generation)
+            } finally {
+                image.close()
+            }
+        }
+        trackerActiveDuringBurst = true
+        val buffers = trackerBuffers
+        val ready = trackerReadyIdx
+        if (buffers != null && ready >= 0 && trackerReadyGeneration == generation && trackerReadyTimestampNs > afterNs) {
+            trackerLastHandedIdx = ready
+            trackerReadyIdx = -1
+            return@synchronized Pixels(
+                trackerBufferWidth,
+                trackerBufferHeight,
+                buffers[ready].duplicate(),
+                trackerReadyTimestampNs,
+                trackerReadyGeneration
+            )
+        }
+        null
     }
 
     private fun captureFrame(hideOverlay: Boolean) {
@@ -339,7 +489,10 @@ class CaptureService : Service() {
                 }
                 // Flush the pre-request image. Waiting alone does not guarantee a fresh frame.
                 val barrier = System.nanoTime()
-                synchronized(imageLock) { imageReader?.acquireLatestImage()?.close() }
+                synchronized(imageLock) {
+                    imageReader?.acquireLatestImage()?.close()
+                    trackerReadyIdx = -1
+                }
                 if (hideOverlay) delay(45) // Diagnostic delay, NOT a guarantee of compositor latency.
                 val deadline = SystemClock.elapsedRealtime() + 1000
                 var pixels: Pixels? = null
@@ -741,20 +894,93 @@ class CaptureService : Service() {
         )
     }
 
+    private fun startFrameDump() {
+        synchronized(imageLock) {
+            if (frameDumper != null || imageReader == null) return
+            lateinit var created: BigMapFrameDumper
+            created = BigMapFrameDumper(
+                context = applicationContext,
+                scope = scope,
+                readCurrentSourceSize = { synchronized(imageLock) { readerWidth to readerHeight } },
+                onCapturePhaseReady = { attachBurstListener(created) },
+                onCapturePhaseFinished = { detachBurstListener(created) },
+                onSessionFinished = { clearFrameDumper(created) }
+            )
+            frameDumper = created
+            if (!created.start()) {
+                frameDumper = null
+            }
+        }
+    }
+
+    private fun attachBurstListener(dumper: BigMapFrameDumper) {
+        synchronized(imageLock) {
+            if (frameDumper !== dumper || imageReader == null || !dumper.isCapturing()) return
+            val thread = HandlerThread("LuxinFrameDumpReader").apply { start() }
+            val handler = Handler(thread.looper)
+            dumpHandlerThread = thread
+            dumpHandler = handler
+            clearTrackerBurstBuffersLocked()
+            trackerActiveDuringBurst = trackingJob?.isActive == true
+            imageReader?.setOnImageAvailableListener(dumpImageListener, handler)
+        }
+    }
+
+    private fun detachBurstListener(dumper: BigMapFrameDumper) {
+        val threadToQuit: HandlerThread?
+        synchronized(imageLock) {
+            if (frameDumper !== dumper) return
+            imageReader?.setOnImageAvailableListener(null, null)
+            clearTrackerBurstBuffersLocked()
+            dumpHandler = null
+            threadToQuit = dumpHandlerThread
+            dumpHandlerThread = null
+        }
+        threadToQuit?.quitSafely()
+    }
+
+    private fun clearFrameDumper(dumper: BigMapFrameDumper) {
+        val threadToQuit: HandlerThread?
+        synchronized(imageLock) {
+            if (frameDumper !== dumper) return
+            imageReader?.setOnImageAvailableListener(null, null)
+            clearTrackerBurstBuffersLocked()
+            dumpHandler = null
+            threadToQuit = dumpHandlerThread
+            dumpHandlerThread = null
+            frameDumper = null
+        }
+        threadToQuit?.quitSafely()
+    }
+
+    private fun stopFrameDump(reason: DumpStopReason) {
+        val dumper = synchronized(imageLock) { frameDumper }
+        dumper?.stop(reason)
+    }
+
     private fun stopCapture() {
         if (stopping) return
         stopping = true
         _isRunning.value = false
+        stopFrameDump(DumpStopReason.CAPTURE_STOPPED)
         stopLiveTracking()
         mainHandler.removeCallbacksAndMessages(null)
         snapshotJob?.cancel()
+        val dumpThreadToQuit: HandlerThread?
         synchronized(imageLock) {
+            imageReader?.setOnImageAvailableListener(null, null)
+            clearTrackerBurstBuffersLocked()
+            dumpHandler = null
+            dumpThreadToQuit = dumpHandlerThread
+            dumpHandlerThread = null
+            frameDumper = null
             virtualDisplay?.release()
             virtualDisplay = null
             imageReader?.close()
             imageReader = null
             generation++
         }
+        dumpThreadToQuit?.quitSafely()
         val projection = mediaProjection
         mediaProjection = null
         projection?.unregisterCallback(projectionCallback)
