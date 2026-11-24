@@ -109,6 +109,7 @@ class CaptureService : Service() {
     // Lazy ping-pong full-res buffers for readFreshPixels() during burst capture (0 bytes if tracker is off).
     private var trackerActiveDuringBurst = false
     private var trackerBuffers: Array<ByteBuffer>? = null
+    private var trackerBurstBuffersUnavailable = false
     private var trackerBufferWidth = 0
     private var trackerBufferHeight = 0
     private var trackerLastHandedIdx = 0
@@ -356,7 +357,7 @@ class CaptureService : Service() {
     // While the burst is off (or in countdown/encoding), no listener is attached and
     // readFreshPixels() executes its untouched direct acquireLatestImage() path.
     // Only during the short RAM CAPTURING phase does this listener drain ImageReader on a
-    // dedicated HandlerThread and write 720p frames directly into preallocated direct ByteBuffers
+    // dedicated HandlerThread and write scaled frames directly into preallocated direct ByteBuffers
     // via OpenCV (zero per-frame heap allocation, no PNG encoding). If live tracking is also
     // active, readFreshPixels() is served from a lazy ping-pong pair of reusable full-res buffers
     // updated in-place via RgbaPlane.copyTightInto at <=20 Hz (never overwriting the buffer the
@@ -381,12 +382,20 @@ class CaptureService : Service() {
                     screenMode = LiveTrackingStatus.state.value.screenMode,
                     droppedBefore = skipped
                 )
-                if (trackerActiveDuringBurst) {
+                if (trackerActiveDuringBurst && !trackerBurstBuffersUnavailable) {
                     val nowMs = SystemClock.elapsedRealtime()
                     if (trackerReadyIdx < 0 || nowMs - trackerLastCopyMs >= 50L) {
                         val crop = latest.cropRect
                         val plane = latest.planes[0]
-                        val buffers = ensureTrackerBuffersLocked(crop.width(), crop.height())
+                        val buffers = try {
+                            ensureTrackerBuffersLocked(crop.width(), crop.height())
+                        } catch (e: OutOfMemoryError) {
+                            // Prioritize recording; the tracker returns to direct capture after the burst.
+                            clearTrackerBurstBuffersLocked()
+                            trackerBurstBuffersUnavailable = true
+                            Log.w(TAG, "Tracker frame buffers unavailable during burst", e)
+                            return@synchronized
+                        }
                         val writeIdx = 1 - trackerLastHandedIdx
                         RgbaPlane.copyTightInto(
                             plane.buffer,
@@ -427,6 +436,7 @@ class CaptureService : Service() {
     private fun clearTrackerBurstBuffersLocked() {
         trackerActiveDuringBurst = false
         trackerBuffers = null
+        trackerBurstBuffersUnavailable = false
         trackerBufferWidth = 0
         trackerBufferHeight = 0
         trackerReadyIdx = -1

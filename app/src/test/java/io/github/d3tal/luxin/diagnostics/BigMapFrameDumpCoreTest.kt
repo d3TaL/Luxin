@@ -49,14 +49,14 @@ class BigMapFrameDumpCoreTest {
 
     @Test
     fun plansBurstPoolStrictlyWithinMemoryBudget() {
-        val config = BigMapDumpConfig() // 256 MiB, targetHeight=720, colorEveryN=10
+        val config = BigMapDumpConfig()
         val plan = BigMapDumpPlanner.planBurstPool(3120, 1440, config)
         assertEquals(1560, plan.width)
         assertEquals(720, plan.height)
         assertEquals(1560L * 720L, plan.grayFrameBytes)
         assertEquals(1560L * 720L * 4L, plan.colorFrameBytes)
         assertEquals(plan.colorFrameBytes, plan.scratchBytes)
-        assertTrue(plan.maxFrames in 150..180)
+        assertTrue(plan.maxFrames in 35..40)
         assertTrue(plan.totalBytes <= config.memoryBudgetBytes)
         // Next frame would exceed the budget.
         val nextFrameBytes = plan.grayFrameBytes +
@@ -71,6 +71,33 @@ class BigMapFrameDumpCoreTest {
         // Tiny budget produces zero frames without throwing.
         val tinyPlan = BigMapDumpPlanner.planBurstPool(3120, 1440, config.copy(memoryBudgetBytes = 1024L))
         assertEquals(0, tinyPlan.maxFrames)
+    }
+
+    @Test
+    fun lowersResolutionToKeepUsefulBurstLengthAndOffersSmallerRetries() {
+        val mib = 1024L * 1024L
+        val config = BigMapDumpConfig()
+        val plans = BigMapDumpPlanner.allocationPlans(3120, 1440, config, 256 * mib)
+        assertEquals(listOf(540, 360, 360), plans.map { it.height })
+        assertTrue(plans.first().maxFrames >= 60)
+        assertTrue(plans.last().maxFrames < 60)
+        for ((plan, limit) in plans.zip(listOf(64L, 32L, 16L))) {
+            assertTrue(plan.totalBytes <= limit * mib)
+        }
+        assertTrue(plans.zipWithNext().all { (a, b) -> a.totalBytes > b.totalBytes })
+    }
+
+    @Test
+    fun respectsProcessHeadroomAndAvoidsAllocatingWithNoUsableBudget() {
+        val mib = 1024L * 1024L
+        val config = BigMapDumpConfig()
+        val plan = BigMapDumpPlanner.allocationPlans(3120, 1440, config, 48 * mib).first()
+        assertEquals(360, plan.height)
+        assertTrue(plan.totalBytes <= 16 * mib)
+        assertTrue(BigMapDumpPlanner.allocationPlans(3120, 1440, config, mib).isEmpty())
+        assertTrue(BigMapDumpPlanner.allocationPlans(3120, 1440, config, -1).isEmpty())
+        val smallSource = BigMapDumpPlanner.allocationPlans(800, 320, config, 192 * mib)
+        assertTrue(smallSource.isNotEmpty() && smallSource.all { it.height == 320 && it.scale == 1.0 })
     }
 
     @Test

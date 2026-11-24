@@ -83,9 +83,9 @@ private object OpenCvRuntimeLoader {
 
 /**
  * Two-phase RAM burst diagnostic dumper:
- *  Phase 1 (COUNTDOWN -> CAPTURING): preallocates direct ByteBuffers within a RAM budget (~256 MB),
- *    then downscales each captured Image directly via OpenCV (INTER_AREA + RGBA2GRAY at 720p, plus
- *    RGBA keyframes every 10th frame) with zero per-frame allocations and zero PNG encoding during capture.
+ *  Phase 1 (COUNTDOWN -> CAPTURING): preallocates direct ByteBuffers within an adaptive RAM budget,
+ *    then downscales each captured Image directly via OpenCV (INTER_AREA + RGBA2GRAY, plus
+ *    RGBA keyframes every 10th frame) with no per-frame pixel buffers or PNG encoding during capture.
  *  Phase 2 (ENCODING): after capture stops, encodes buffered frames to PNG on Dispatchers.IO,
  *    writes frames.csv, summary.txt, and exports the filtered tracking log into the SAF subfolder.
  */
@@ -107,6 +107,8 @@ internal class BigMapFrameDumper(
         var screenMode: String = "unknown"
         var droppedBefore: Int = 0
     }
+
+    private class AllocatedPool(val plan: BurstPoolPlan, val slots: Array<FrameSlot?>, val scratch: ByteBuffer?)
 
     private val started = AtomicBoolean(false)
     private val capturing = AtomicBoolean(false)
@@ -144,7 +146,7 @@ internal class BigMapFrameDumper(
     }
 
     /**
-     * Converts [image] directly into the next preallocated 720p direct buffer before image.close().
+     * Converts [image] directly into the next preallocated direct buffer before image.close().
      * Never allocates per-frame buffers and never calls back into CaptureService under captureLock.
      */
     fun captureFrameFromImage(
@@ -270,6 +272,26 @@ internal class BigMapFrameDumper(
         captureDone.complete(reason)
     }
 
+    // Keep each attempt in its own call so a failed allocation doesn't retain a partial pool
+    // while allocating the next, smaller pool.
+    private fun allocatePool(candidate: BurstPoolPlan): AllocatedPool? = try {
+        val scratch = if (candidate.scratchBytes > 0L) ByteBuffer.allocateDirect(candidate.scratchBytes.toInt()) else null
+        val frames = arrayOfNulls<FrameSlot>(candidate.maxFrames)
+        for (i in frames.indices) {
+            val gray = ByteBuffer.allocateDirect(candidate.grayFrameBytes.toInt())
+            val rgba = if (BigMapDumpPlanner.isColorKeyframe(i, config.colorEveryN)) {
+                ByteBuffer.allocateDirect(candidate.colorFrameBytes.toInt())
+            } else {
+                null
+            }
+            frames[i] = FrameSlot(gray, rgba)
+        }
+        AllocatedPool(candidate, frames, scratch)
+    } catch (e: OutOfMemoryError) {
+        Log.w(TAG, "Could not allocate burst pool: ${candidate.totalBytes} bytes, ${candidate.maxFrames} frames", e)
+        null
+    }
+
     private suspend fun runSession() {
         var activePlan: BurstPoolPlan? = null
         var folderName: String? = null
@@ -290,7 +312,7 @@ internal class BigMapFrameDumper(
             }
 
             // Run countdown BEFORE sizing/allocating the pool so portrait->landscape switch into
-            // the game settles before preallocating the 720p direct buffers.
+            // the game settles before preallocating the direct buffers.
             if (config.startDelayMs > 0L) {
                 var remainingMs = config.startDelayMs
                 while (remainingMs > 0L) {
@@ -330,49 +352,25 @@ internal class BigMapFrameDumper(
             if (sourceWidth <= 0 || sourceHeight <= 0) {
                 throw IOException("Неизвестный размер кадра захвата")
             }
-            val computedPlan = BigMapDumpPlanner.planBurstPool(sourceWidth, sourceHeight, config)
-            if (computedPlan.maxFrames <= 0) {
-                val budgetMb = config.memoryBudgetBytes / (1024L * 1024L)
-                throw IOException("Бюджета памяти ($budgetMb МБ) недостаточно для кадра ${computedPlan.width}×${computedPlan.height}")
-            }
-            activePlan = computedPlan
-
-            BigMapFrameDumpStatus.publish(
-                baseState(computedPlan).copy(
-                    phase = DumpPhase.CAPTURING,
-                    message = "Выделение буфера RAM (${computedPlan.totalBytes / (1024L * 1024L)} МБ)…"
+            val runtime = Runtime.getRuntime()
+            val heapHeadroom = runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())
+            var pool: AllocatedPool? = null
+            for (candidate in BigMapDumpPlanner.allocationPlans(sourceWidth, sourceHeight, config, heapHeadroom)) {
+                if (captureDone.isCompleted) break
+                BigMapFrameDumpStatus.publish(
+                    defaultState().copy(
+                        phase = DumpPhase.CAPTURING,
+                        message = "Выделение буфера: ${candidate.width}×${candidate.height}, до ${candidate.maxFrames} кадров…"
+                    )
                 )
-            )
-
-            // Preallocate all direct ByteBuffers before attaching the capture listener.
-            val allocatedSlots = arrayOfNulls<FrameSlot>(computedPlan.maxFrames)
-            val allocatedScratch: ByteBuffer?
-            try {
-                allocatedScratch = if (computedPlan.scratchBytes > 0L) {
-                    ByteBuffer.allocateDirect(computedPlan.scratchBytes.toInt())
-                } else {
-                    null
-                }
-                for (i in 0 until computedPlan.maxFrames) {
-                    val gray = ByteBuffer.allocateDirect(computedPlan.grayFrameBytes.toInt())
-                    val rgba = if (BigMapDumpPlanner.isColorKeyframe(i, config.colorEveryN)) {
-                        ByteBuffer.allocateDirect(computedPlan.colorFrameBytes.toInt())
-                    } else {
-                        null
-                    }
-                    allocatedSlots[i] = FrameSlot(gray, rgba)
-                }
-            } catch (e: OutOfMemoryError) {
-                allocatedSlots.fill(null)
-                val needMb = computedPlan.totalBytes / (1024L * 1024L)
-                throw IOException("Недостаточно памяти для буфера дампа ($needMb МБ). Закройте лишние приложения и повторите.", e)
+                pool = allocatePool(candidate)
+                if (pool != null) break
             }
 
             if (captureDone.isCompleted) {
-                allocatedSlots.fill(null)
                 val reason = stopReason.get() ?: DumpStopReason.USER
                 BigMapFrameDumpStatus.publish(
-                    baseState(computedPlan).copy(
+                    defaultState().copy(
                         phase = DumpPhase.DONE,
                         stopReason = reason,
                         message = "Дамп отменён до начала записи"
@@ -381,10 +379,19 @@ internal class BigMapFrameDumper(
                 return
             }
 
+            val allocation = pool ?: run {
+                Log.w(TAG, "No usable burst pool for ${sourceWidth}x$sourceHeight; heap headroom=$heapHeadroom bytes")
+                throw IOException(
+                    "Не удалось выделить память для дампа даже с уменьшенным буфером. " +
+                        "Остановите живой трекер и попробуйте снова."
+                )
+            }
+            val computedPlan = allocation.plan
+            activePlan = computedPlan
             synchronized(captureLock) {
                 plan = computedPlan
-                slots = allocatedSlots
-                scratchRgbaBuf = allocatedScratch
+                slots = allocation.slots
+                scratchRgbaBuf = allocation.scratch
                 capturedCount = 0
                 totalDropped = 0
                 lastCapturedTimestampNs = Long.MIN_VALUE
@@ -427,6 +434,7 @@ internal class BigMapFrameDumper(
                 scratchRgbaBuf = null
                 finalCaptured = capturedCount
                 finalDropped = totalDropped
+                for (i in finalCaptured until slots.size) slots[i] = null
             }
 
             val timestamps = ArrayList<Long>(finalCaptured)

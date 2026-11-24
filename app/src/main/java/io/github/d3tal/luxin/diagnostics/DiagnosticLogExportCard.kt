@@ -145,9 +145,10 @@ internal fun BigMapFrameDumpCard(isCaptureActive: Boolean) {
                 )
             }
             Text(
-                text = "Двухфазный burst-дамп: через ${dumpState.startDelaySec} с после включения пишет " +
-                    "подряд идущие кадры в предвыделенный RAM-буфер (~${dumpState.memoryBudgetMb} МБ) " +
-                    "в 720p (серый + каждый 10-й цветной) без кодирования на лету, затем сохраняет PNG, " +
+                text = "Через ${dumpState.startDelaySec} с после включения дамп записывает " +
+                    "кадры в буфер до ${dumpState.memoryBudgetMb} МБ. Размер кадров — до 720p: " +
+                    "зависит от памяти, доступной приложению. После записи сохраняются PNG " +
+                    "(серые кадры и каждый 10-й в цвете), " +
                     "frames.csv, summary.txt и лог трекинга в подпапку bigmap_dump_…. " +
                     "Автостоп: заполнение буфера или ${dumpState.maxDurationSec} с.",
                 style = MaterialTheme.typography.bodySmall

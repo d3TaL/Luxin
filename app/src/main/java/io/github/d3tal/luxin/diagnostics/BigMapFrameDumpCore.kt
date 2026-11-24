@@ -46,7 +46,7 @@ internal data class BigMapDumpConfig(
         const val DEFAULT_MAX_DURATION_MS = 20_000L
         const val DEFAULT_TARGET_HEIGHT = 720
         const val DEFAULT_COLOR_EVERY_N = 10
-        const val DEFAULT_MEMORY_BUDGET_BYTES = 256L * 1024L * 1024L
+        const val DEFAULT_MEMORY_BUDGET_BYTES = 64L * 1024L * 1024L
         const val DEFAULT_MAX_FRAMES_CAP = 600
     }
 }
@@ -95,6 +95,26 @@ internal data class FrameDumpRecord(
 )
 
 internal object BigMapDumpPlanner {
+    private const val PREFERRED_BURST_FRAMES = 60
+
+    /** Plan against this process's remaining heap, not the phone's free RAM. */
+    fun allocationPlans(sourceWidth: Int, sourceHeight: Int, config: BigMapDumpConfig,
+                        heapHeadroomBytes: Long): List<BurstPoolPlan> {
+        // Leave headroom for ImageReader clients, tracker buffers and PNG encoding. Headroom
+        // estimates are no guarantee of allocation success, so offer progressively smaller pools.
+        val budget = minOf(config.memoryBudgetBytes, heapHeadroomBytes.coerceAtLeast(0L) / 3)
+        val fullHeight = minOf(sourceHeight, config.targetHeight)
+        val heights = listOf(fullHeight, minOf(fullHeight, 540), minOf(fullHeight, 360)).distinct()
+        val preferredFrames = minOf(config.maxFramesCap, PREFERRED_BURST_FRAMES)
+        return listOf(budget, budget / 2, budget / 4).filter { it > 0L }.mapNotNull { bytes ->
+            val candidates = heights.map { height ->
+                planBurstPool(sourceWidth, sourceHeight, config.copy(targetHeight = height, memoryBudgetBytes = bytes))
+            }
+            val plan = candidates.firstOrNull { it.maxFrames >= preferredFrames } ?: candidates.last()
+            plan.takeIf { it.maxFrames >= 2 }
+        }.distinct()
+    }
+
     fun computeScaledDimensions(sourceWidth: Int, sourceHeight: Int, targetHeight: Int): ScaledDimensions {
         require(sourceWidth > 0 && sourceHeight > 0) { "source dimensions must be positive" }
         require(targetHeight > 0) { "targetHeight must be positive" }
