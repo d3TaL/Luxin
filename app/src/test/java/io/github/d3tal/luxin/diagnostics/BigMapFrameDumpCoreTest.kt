@@ -201,6 +201,31 @@ class BigMapFrameDumpCoreTest {
         assertEquals(DumpStopReason.MAX_DURATION, limiter.shouldStop(nowMs = 21_000L, capturedFrames = 10))
     }
 
+    @Test
+    fun zeroFramesMessageSeparatesNoImagesFromRejectedImages() {
+        val none = BigMapDumpDiagnostics.zeroFramesMessage(
+            DumpStopReason.MAX_DURATION, 20_000L, CaptureRejectStats()
+        )
+        assertTrue(none.startsWith("Захват завершён: не получено ни одного кадра"))
+        assertTrue(none.contains("не прислала ни одного кадра за 20.0 с"))
+        assertTrue(none.contains("лимит времени"))
+
+        val rejected = BigMapDumpDiagnostics.zeroFramesMessage(
+            DumpStopReason.MAX_DURATION, 3_500L,
+            CaptureRejectStats(imagesSeen = 7, badPlane = 5, conversionErrors = 2, lastNote = "plane: direct=false")
+        )
+        assertTrue(rejected.contains("кадров от системы: 7"))
+        assertTrue(rejected.contains("формат буфера 5"))
+        assertTrue(rejected.contains("ошибка конвертации 2"))
+        assertTrue(rejected.endsWith("[plane: direct=false]"))
+
+        val resized = BigMapDumpDiagnostics.zeroFramesMessage(
+            DumpStopReason.RESIZE, 100L, CaptureRejectStats(imagesSeen = 1, lastNote = "кадр 1×1")
+        )
+        assertTrue(resized.contains("размер кадра изменился"))
+        assertTrue(resized.contains("смена размера кадра"))
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun configRejectsNegativeDelay() {
         BigMapDumpConfig(startDelayMs = -1L)

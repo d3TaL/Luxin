@@ -106,6 +106,8 @@ class CaptureService : Service() {
     private var frameDumper: BigMapFrameDumper? = null
     private var dumpHandlerThread: HandlerThread? = null
     private var dumpHandler: Handler? = null
+    // Last time dumpImageListener drained the reader (listener callback or pump); read by the pump off-lock.
+    @Volatile private var dumpLastDrainMs = 0L
     // Lazy ping-pong full-res buffers for readFreshPixels() during burst capture (0 bytes if tracker is off).
     private var trackerActiveDuringBurst = false
     private var trackerBuffers: Array<ByteBuffer>? = null
@@ -154,6 +156,8 @@ class CaptureService : Service() {
 
     companion object {
         private const val TAG = "LuxinCapture"
+        private const val DUMP_PUMP_PERIOD_MS = 20L
+        private const val DUMP_PUMP_IDLE_MS = 40L
         const val ACTION_START = "io.github.d3tal.luxin.capture.ACTION_START"
         const val ACTION_STOP = "io.github.d3tal.luxin.capture.ACTION_STOP"
         const val ACTION_TAKE_SNAPSHOT = "io.github.d3tal.luxin.capture.ACTION_TAKE_SNAPSHOT"
@@ -367,6 +371,7 @@ class CaptureService : Service() {
             if (reader !== imageReader) return@synchronized
             val dumper = frameDumper
             if (dumper == null || !dumper.isCapturing()) return@synchronized
+            dumpLastDrainMs = SystemClock.elapsedRealtime()
             var latest = reader.acquireNextImage() ?: return@synchronized
             var skipped = 0
             try {
@@ -416,6 +421,27 @@ class CaptureService : Service() {
             } finally {
                 latest.close()
             }
+        }
+    }
+
+    // OnImageAvailableListener fires only for buffers queued AFTER it was attached, and a reader nobody drains
+    // fills its queue (maxImages) and then stops receiving new frames at all. Between the tracker's own
+    // acquireLatestImage() calls the queue is practically always full, so without a drain here the listener
+    // can wait for a first callback that never comes (burst ends with zero frames). The pump drains once right
+    // after attach and then acts as a safety net whenever no callback has drained the reader for a while.
+    private val dumpPump = object : Runnable {
+        override fun run() {
+            val target = synchronized(imageLock) {
+                val dumper = frameDumper
+                val handler = dumpHandler
+                val reader = imageReader
+                if (dumper == null || !dumper.isCapturing() || handler == null || reader == null) null
+                else handler to reader
+            } ?: return
+            if (SystemClock.elapsedRealtime() - dumpLastDrainMs >= DUMP_PUMP_IDLE_MS) {
+                dumpImageListener.onImageAvailable(target.second)
+            }
+            target.first.postDelayed(this, DUMP_PUMP_PERIOD_MS)
         }
     }
 
@@ -932,7 +958,9 @@ class CaptureService : Service() {
             dumpHandler = handler
             clearTrackerBurstBuffersLocked()
             trackerActiveDuringBurst = trackingJob?.isActive == true
+            dumpLastDrainMs = 0L
             imageReader?.setOnImageAvailableListener(dumpImageListener, handler)
+            handler.post(dumpPump)
         }
     }
 

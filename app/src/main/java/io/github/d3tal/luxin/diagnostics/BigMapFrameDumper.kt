@@ -128,6 +128,21 @@ internal class BigMapFrameDumper(
     private var lastStatusPublishMs = 0L
     private var limiter: BigMapDumpLimiter? = null
 
+    // Guarded by captureLock. Explains a zero-frame burst (see BigMapDumpDiagnostics).
+    private var imagesSeen = 0
+    private var staleTimestampCount = 0
+    private var badPlaneCount = 0
+    private var conversionErrorCount = 0
+    private var lastRejectNote: String? = null
+
+    private fun rejectStatsLocked() = CaptureRejectStats(
+        imagesSeen = imagesSeen,
+        staleTimestamp = staleTimestampCount,
+        badPlane = badPlaneCount,
+        conversionErrors = conversionErrorCount,
+        lastNote = lastRejectNote
+    )
+
     fun isCapturing(): Boolean = capturing.get()
 
     fun start(): Boolean {
@@ -158,6 +173,10 @@ internal class BigMapFrameDumper(
         if (!capturing.get()) return
         synchronized(captureLock) {
             if (!capturing.get()) return
+            imagesSeen++
+            if (imagesSeen == 1) {
+                Log.i(TAG, "First image from ImageReader: ${image.width}x${image.height} ts=${image.timestamp}")
+            }
             val activePlan = plan ?: return
             val activeLimiter = limiter
             val nowMs = SystemClock.elapsedRealtime()
@@ -172,12 +191,16 @@ internal class BigMapFrameDumper(
                 return
             }
             if (image.timestamp <= lastCapturedTimestampNs) {
+                staleTimestampCount++
                 totalDropped += droppedBefore.coerceAtLeast(0)
                 return
             }
 
             val crop = image.cropRect
             if (crop.width() != activePlan.sourceWidth || crop.height() != activePlan.sourceHeight) {
+                lastRejectNote = "кадр ${crop.width()}×${crop.height()}, ожидался " +
+                    "${activePlan.sourceWidth}×${activePlan.sourceHeight}"
+                Log.w(TAG, "Image size differs from plan: $lastRejectNote")
                 signalCaptureStopLocked(DumpStopReason.RESIZE)
                 return
             }
@@ -185,12 +208,11 @@ internal class BigMapFrameDumper(
             val plane = image.planes[0]
             val planeBuf = plane.buffer
             if (!planeBuf.isDirect || plane.pixelStride != 4 || plane.rowStride < image.width * 4) {
+                badPlaneCount++
                 totalDropped += droppedBefore.coerceAtLeast(0) + 1
-                Log.w(
-                    TAG,
-                    "Unsupported Image plane: direct=${planeBuf.isDirect} pixelStride=${plane.pixelStride} " +
-                        "rowStride=${plane.rowStride} width=${image.width}"
-                )
+                lastRejectNote = "plane: direct=${planeBuf.isDirect} pixelStride=${plane.pixelStride} " +
+                    "rowStride=${plane.rowStride} width=${image.width}"
+                Log.w(TAG, "Unsupported Image $lastRejectNote")
                 return
             }
 
@@ -253,7 +275,11 @@ internal class BigMapFrameDumper(
                         )
                     )
                 }
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
+                // Throwable, not Exception: a missing OpenCV JNI symbol is an UnsatisfiedLinkError and would
+                // otherwise kill the reader thread with zero frames and no explanation.
+                conversionErrorCount++
+                lastRejectNote = "${e.javaClass.simpleName}: ${e.message}".take(160)
                 Log.e(TAG, "Frame conversion failed during burst capture", e)
                 totalDropped += droppedBefore.coerceAtLeast(0) + 1
             } finally {
@@ -396,6 +422,11 @@ internal class BigMapFrameDumper(
                 totalDropped = 0
                 lastCapturedTimestampNs = Long.MIN_VALUE
                 lastStatusPublishMs = 0L
+                imagesSeen = 0
+                staleTimestampCount = 0
+                badPlaneCount = 0
+                conversionErrorCount = 0
+                lastRejectNote = null
             }
 
             // Phase 1: CAPTURING into preallocated RAM pool.
@@ -419,6 +450,13 @@ internal class BigMapFrameDumper(
             }
             onCapturePhaseReady()
             captureListenerAttached = true
+            scope.launch(Dispatchers.Default) {
+                delay(2_000L)
+                val seen = synchronized(captureLock) { imagesSeen }
+                if (capturing.get() && seen == 0) {
+                    Log.w(TAG, "No image from ImageReader 2 s after the listener was attached")
+                }
+            }
 
             val reason = captureDone.await()
             stopReason.compareAndSet(null, reason)
@@ -430,10 +468,12 @@ internal class BigMapFrameDumper(
 
             val finalCaptured: Int
             val finalDropped: Int
+            val finalReject: CaptureRejectStats
             synchronized(captureLock) {
                 scratchRgbaBuf = null
                 finalCaptured = capturedCount
                 finalDropped = totalDropped
+                finalReject = rejectStatsLocked()
                 for (i in finalCaptured until slots.size) slots[i] = null
             }
 
@@ -454,7 +494,11 @@ internal class BigMapFrameDumper(
                         achievedFps = 0.0,
                         maxGapMs = 0.0,
                         stopReason = stopReason.get() ?: DumpStopReason.USER,
-                        message = "Захват завершён: не получено ни одного кадра"
+                        message = BigMapDumpDiagnostics.zeroFramesMessage(
+                            stopReason.get() ?: DumpStopReason.USER,
+                            SystemClock.elapsedRealtime() - captureStartMs,
+                            finalReject
+                        )
                     )
                 )
                 return

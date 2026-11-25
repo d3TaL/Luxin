@@ -245,6 +245,49 @@ internal class BigMapDumpLimiter(
     }
 }
 
+/**
+ * Why a burst may end with zero frames. Counted per Image handed to
+ * [BigMapFrameDumper.captureFrameFromImage] while the burst was CAPTURING.
+ * imagesSeen == 0 means the system never delivered an Image (nothing to convert).
+ */
+internal data class CaptureRejectStats(
+    val imagesSeen: Int = 0,
+    val staleTimestamp: Int = 0,
+    val badPlane: Int = 0,
+    val conversionErrors: Int = 0,
+    val lastNote: String? = null
+)
+
+internal object BigMapDumpDiagnostics {
+    /** Message for a burst that captured nothing. The reason is spelled out so one screenshot is enough to diagnose it. */
+    fun zeroFramesMessage(reason: DumpStopReason, durationMs: Long, stats: CaptureRejectStats): String {
+        val seconds = String.format(Locale.US, "%.1f", durationMs / 1000.0)
+        val cause = when {
+            stats.imagesSeen == 0 ->
+                "система не прислала ни одного кадра за $seconds с " +
+                    "(экран не обновлялся или очередь ImageReader не освобождена)"
+            reason == DumpStopReason.RESIZE ->
+                "размер кадра изменился до записи первого кадра"
+            else ->
+                "кадров от системы: ${stats.imagesSeen}, не записано: " +
+                    "дубль метки времени ${stats.staleTimestamp}, " +
+                    "формат буфера ${stats.badPlane}, " +
+                    "ошибка конвертации ${stats.conversionErrors}"
+        }
+        val note = stats.lastNote?.takeIf { it.isNotBlank() }?.let { " [$it]" }.orEmpty()
+        return "Захват завершён: не получено ни одного кадра — $cause (остановка: ${reasonLabel(reason)})$note"
+    }
+
+    fun reasonLabel(reason: DumpStopReason): String = when (reason) {
+        DumpStopReason.USER -> "по кнопке"
+        DumpStopReason.BUFFER_FULL -> "буфер заполнен"
+        DumpStopReason.MAX_DURATION -> "лимит времени"
+        DumpStopReason.RESIZE -> "смена размера кадра"
+        DumpStopReason.CAPTURE_STOPPED -> "захват экрана остановлен"
+        DumpStopReason.ERROR -> "ошибка"
+    }
+}
+
 internal object BigMapDumpFormat {
     const val CSV_HEADER =
         "index,timestampNs,width,height,generation,screenMode,dropped_before,has_color,source_width,source_height,scale"
