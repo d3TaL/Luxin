@@ -45,7 +45,7 @@ internal data class BigMapDumpConfig(
         const val DEFAULT_START_DELAY_MS = 5_000L
         const val DEFAULT_MAX_DURATION_MS = 20_000L
         const val DEFAULT_TARGET_HEIGHT = 720
-        const val DEFAULT_COLOR_EVERY_N = 10
+        const val DEFAULT_COLOR_EVERY_N = 30
         const val DEFAULT_MEMORY_BUDGET_BYTES = 64L * 1024L * 1024L
         const val DEFAULT_MAX_FRAMES_CAP = 600
     }
@@ -95,7 +95,9 @@ internal data class FrameDumpRecord(
 )
 
 internal object BigMapDumpPlanner {
-    private const val PREFERRED_BURST_FRAMES = 60
+    // ~3 s at the ~47 fps seen on device: enough for a long swipe plus a full pinch. The first height
+    // (720, 540, 360) that fits this many frames in the budget wins, so 360p is normally chosen.
+    private const val PREFERRED_BURST_FRAMES = 150
 
     /** Plan against this process's remaining heap, not the phone's free RAM. */
     fun allocationPlans(sourceWidth: Int, sourceHeight: Int, config: BigMapDumpConfig,

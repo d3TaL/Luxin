@@ -56,13 +56,13 @@ class BigMapFrameDumpCoreTest {
         assertEquals(1560L * 720L, plan.grayFrameBytes)
         assertEquals(1560L * 720L * 4L, plan.colorFrameBytes)
         assertEquals(plan.colorFrameBytes, plan.scratchBytes)
-        assertTrue(plan.maxFrames in 35..40)
+        assertTrue(plan.maxFrames in 44..50)
         assertTrue(plan.totalBytes <= config.memoryBudgetBytes)
         // Next frame would exceed the budget.
         val nextFrameBytes = plan.grayFrameBytes +
             if (BigMapDumpPlanner.isColorKeyframe(plan.maxFrames, config.colorEveryN)) plan.colorFrameBytes else 0L
         assertTrue(plan.totalBytes + nextFrameBytes > config.memoryBudgetBytes)
-        assertEquals((plan.maxFrames + 9) / 10, plan.colorFrames)
+        assertEquals((plan.maxFrames + config.colorEveryN - 1) / config.colorEveryN, plan.colorFrames)
 
         // When source height <= targetHeight, no RGBA scratch buffer is needed.
         val noScalePlan = BigMapDumpPlanner.planBurstPool(1280, 720, config)
@@ -78,9 +78,10 @@ class BigMapFrameDumpCoreTest {
         val mib = 1024L * 1024L
         val config = BigMapDumpConfig()
         val plans = BigMapDumpPlanner.allocationPlans(3120, 1440, config, 256 * mib)
-        assertEquals(listOf(540, 360, 360), plans.map { it.height })
-        assertTrue(plans.first().maxFrames >= 60)
-        assertTrue(plans.last().maxFrames < 60)
+        assertEquals(listOf(360, 360, 360), plans.map { it.height })
+        // A full pool must hold a long swipe plus a pinch (~3 s at ~47 fps); the last retry may be shorter.
+        assertTrue(plans.first().maxFrames >= 150)
+        assertTrue(plans.last().maxFrames < 150)
         for ((plan, limit) in plans.zip(listOf(64L, 32L, 16L))) {
             assertTrue(plan.totalBytes <= limit * mib)
         }
