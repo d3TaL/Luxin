@@ -12,7 +12,7 @@ if(ANDROID)
     set(OpenCV_LIBS OpenCV::opencv_java4)
     set(OpenCV_INCLUDE_DIRS "")
 else()
-    find_package(OpenCV QUIET COMPONENTS core imgproc features2d flann calib3d imgcodecs)
+    find_package(OpenCV QUIET COMPONENTS core imgproc features2d flann calib3d imgcodecs video)
     if(NOT OpenCV_FOUND)
         find_path(OPENCV_INCLUDE_DIR NAMES opencv2/core.hpp PATH_SUFFIXES opencv4)
         if(NOT OPENCV_INCLUDE_DIR)
@@ -20,7 +20,7 @@ else()
         endif()
         set(OpenCV_INCLUDE_DIRS "${OPENCV_INCLUDE_DIR}")
         set(OpenCV_LIBS "")
-        foreach(mod IN ITEMS core imgproc features2d flann calib3d imgcodecs)
+        foreach(mod IN ITEMS core imgproc features2d flann calib3d imgcodecs video)
             find_library(OPENCV_${mod}_LIB NAMES "opencv_${mod}")
             if(NOT OPENCV_${mod}_LIB)
                 message(FATAL_ERROR "OpenCV library opencv_${mod} not found")
@@ -35,6 +35,7 @@ add_library(luxin_tracker STATIC
     src/bigmap_detector.cpp
     src/bigmap_geometry.cpp
     src/bigmap_session.cpp
+    src/bigmap_motion.cpp
 )
 
 target_include_directories(luxin_tracker
@@ -80,6 +81,10 @@ if(LUXIN_BUILD_TESTS AND NOT ANDROID)
     add_executable(test_bigmap_session tests/test_bigmap_session.cpp)
     target_link_libraries(test_bigmap_session PRIVATE luxin_tracker)
     add_test(NAME test_bigmap_session COMMAND test_bigmap_session)
+
+    add_executable(test_bigmap_motion tests/test_bigmap_motion.cpp)
+    target_link_libraries(test_bigmap_motion PRIVATE luxin_tracker)
+    add_test(NAME test_bigmap_motion COMMAND test_bigmap_motion)
 
     add_executable(test_bigmap_follow_mask tests/test_bigmap_follow_mask.cpp)
     target_link_libraries(test_bigmap_follow_mask PRIVATE luxin_tracker)

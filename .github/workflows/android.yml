@@ -25,8 +25,8 @@ jobs:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libopencv-dev
       - run: cmake -S tracker -B tracker/build-debug -DCMAKE_BUILD_TYPE=Debug
-      - run: cmake --build tracker/build-debug --target test_bigmap_session test_bigmap_geometry -j2
-      - run: ctest --test-dir tracker/build-debug --output-on-failure -R '^(test_bigmap_session|test_bigmap_geometry)$'
+      - run: cmake --build tracker/build-debug --target test_bigmap_session test_bigmap_geometry test_bigmap_motion -j2
+      - run: ctest --test-dir tracker/build-debug --output-on-failure -R '^(test_bigmap_session|test_bigmap_geometry|test_bigmap_motion)$'
 
   build:
     name: Build Debug APK (with Android NDK & OpenCV 4.10)

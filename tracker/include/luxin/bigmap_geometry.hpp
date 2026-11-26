@@ -21,6 +21,9 @@ struct BigMapGeometry {
 
 // Conservative union of plain/layer/panel UI masks, scaled from the research frame.
 cv::Mat bigMapGeometryMask(cv::Size size);
+// Same fixed UI exclusions, but leaves the optional panel observable for temporal ROI checks.
+// This mask is NOT for feature extraction or absolute registration.
+cv::Mat bigMapControlSourceMask(cv::Size size);
 
 // Both transforms map Kongying units to captured pixels. Compare over the entire frame.
 bool equivalentBigMapGeometry(const BigMapGeometry& a, const BigMapGeometry& b);

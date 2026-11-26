@@ -16,23 +16,30 @@ bool bigMapGeometryQualityAccepted(int inliers, int matches, double error_px,
         hull_area / visible_pixels >= 0.05;
 }
 
-cv::Mat bigMapGeometryMask(cv::Size size) {
+namespace {
+cv::Mat mapMask(cv::Size size, bool exclude_possible_panel) {
     if (size.width <= 0 || size.height <= 0) return {};
     cv::Mat mask(size, CV_8UC1, cv::Scalar(255));
-    // Deliberately do not infer panel state: exclude its possible extent and shifted floors.
+    // Features exclude the entire possible panel. ROI comparisons must observe that area.
     const cv::Rect boxes[] = {
         {0, 0, 760, 520}, {140, 510, 120, 420}, {1460, 0, 1660, 140},
-        {2020, 0, 1100, 1440}, {1190, 1270, 1930, 170}, {140, 1270, 140, 140}
+        {1190, 1270, 1930, 170}, {140, 1270, 140, 140}
     };
-    for (const auto& box : boxes) {
+    auto exclude = [&](cv::Rect box) {
         const int x0 = static_cast<int>(std::floor(box.x * (size.width / 3120.0)));
         const int y0 = static_cast<int>(std::floor(box.y * (size.height / 1440.0)));
         const int x1 = static_cast<int>(std::ceil((box.x + box.width) * (size.width / 3120.0)));
         const int y1 = static_cast<int>(std::ceil((box.y + box.height) * (size.height / 1440.0)));
         mask(cv::Rect(x0, y0, x1 - x0, y1 - y0) & cv::Rect(0, 0, size.width, size.height)).setTo(0);
-    }
+    };
+    for (const auto& box : boxes) exclude(box);
+    if (exclude_possible_panel) exclude({2020, 0, 1100, 1440});
     return mask;
 }
+} // namespace
+
+cv::Mat bigMapGeometryMask(cv::Size size) { return mapMask(size, true); }
+cv::Mat bigMapControlSourceMask(cv::Size size) { return mapMask(size, false); }
 
 namespace {
 struct Candidate {
