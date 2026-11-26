@@ -159,6 +159,43 @@ struct Masks {
             corners = ui.clone();
     }
 };
+// Pixel evidence only, never a threshold on the fitted LK transform. Exact repeats and
+// bounded, uncorrelated 8-bit dither are static; coherent subpixel motion must accumulate.
+// Symmetric gradients avoid correlating a noisy previous frame with its own residual.
+bool staticPixels(const cv::Mat &prev, const cv::Mat &now, const cv::Mat &mask) {
+    constexpr int kNoiseDelta = 2; // independent +/-1 gray-level dither in each frame
+    constexpr double kNoiseSigma = 6.;
+    double energy = 0;
+    cv::Vec3d dot{}, gradient_energy{};
+    int count = 0;
+    for (int y = 1; y < prev.rows - 1; ++y) {
+        for (int x = 1; x < prev.cols - 1; ++x) {
+            if (!mask.at<uchar>(y, x))
+                continue;
+            const double delta = int(now.at<uchar>(y, x)) - int(prev.at<uchar>(y, x));
+            if (std::abs(delta) > kNoiseDelta)
+                return false;
+            auto average = [&](int row, int col) {
+                return .5 * (int(now.at<uchar>(row, col)) + int(prev.at<uchar>(row, col)));
+            };
+            const double gx = average(y, x + 1) - average(y, x - 1);
+            const double gy = average(y + 1, x) - average(y - 1, x);
+            const cv::Vec3d g(gx, gy, gx * (x - prev.cols * .5) + gy * (y - prev.rows * .5));
+            for (int k = 0; k < 3; ++k) {
+                dot[k] += delta * g[k];
+                gradient_energy[k] += g[k] * g[k];
+            }
+            energy += delta * delta;
+            ++count;
+        }
+    }
+    if (count < 64)
+        return false;
+    for (int k = 0; k < 3; ++k)
+        if (dot[k] * dot[k] > kNoiseSigma * kNoiseSigma * (energy / count) * gradient_energy[k])
+            return false;
+    return true;
+}
 BigMapMotionStep track(const cv::Mat &prev, const cv::Mat &now, const Masks &masks,
                        const std::optional<Pose> &prediction) {
     auto start = Clock::now();
@@ -209,9 +246,11 @@ BigMapMotionStep track(const cv::Mat &prev, const cv::Mat &now, const Masks &mas
         r.ransac_ms += first_fit;
     }
     r.corners = static_cast<int>(points.size());
-    r.lk_ms = elapsed(start) - r.ransac_ms;
-    if (r.ok && std::hypot(r.work(0, 2), r.work(1, 2)) < .05 && std::abs(r.work(0, 0) - 1) < 5e-4)
+    if (r.ok && staticPixels(prev, now, masks.corners)) {
         r.work = Pose::eye();
+        r.reason = "static_pixels";
+    }
+    r.lk_ms = elapsed(start) - r.ransac_ms;
     return r;
 }
 

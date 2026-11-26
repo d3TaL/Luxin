@@ -16,13 +16,15 @@ def matrix(scale, dx, dy, height_3120, frame_width, frame_height):
     return reference.make_3dof(scale, dx + (1-scale)*1560., dy + (1-scale)*height_3120*.5)
 
 
-def compare(binary, dump):
+def compare(binary, dump, stride=1, details=None, ok_rate_only=False):
+    if stride < 1:
+        raise ValueError('stride must be positive')
     # A partial native CSV (e.g. a missing PNG midway through) must never pass.
-    run = subprocess.run([str(binary.resolve()), str(dump)], check=True, text=True, stdout=subprocess.PIPE)
+    run = subprocess.run([str(binary.resolve()), str(dump), '--stride', str(stride)], check=True, text=True, stdout=subprocess.PIPE)
     native = list(csv.DictReader(run.stdout.splitlines()))
     with (dump / 'frames.csv').open(newline='', encoding='utf-8') as fh:
-        manifest = list(csv.DictReader(fh))
-    frames = reference.load_frames_from_dump(dump, work_height=360)
+        manifest = list(csv.DictReader(fh))[::stride]
+    frames = reference.load_frames_from_dump(dump, work_height=360, stride=stride)
     if not (len(native) == len(frames) == len(manifest) >= 2):
         raise ValueError('incomplete frame sequence')
     for row, frame, entry in zip(native, frames, manifest):
@@ -37,6 +39,10 @@ def compare(binary, dump):
     rows, _ = reference.evaluate_method('lk_3dof_pred', frames, mask)
     if len(rows) != len(frames)-1:
         raise ValueError('incomplete reference sequence')
+    if any(int(n['index']) != r.frame_idx for n, r in zip(native[1:], rows)):
+        raise ValueError('reference frame identity mismatch')
+    if ok_rate_only:
+        return len(rows), sum(r['ok']=='1' for r in native[1:]), sum(r.ok for r in rows)
     height = h * 3120. / w
     worst = 0.
     worst_index = frames[0].index
@@ -52,6 +58,8 @@ def compare(binary, dump):
         error = reference.pose_corner_error_3120(actual, expected, 3120, height)
         if not math.isfinite(error):
             raise ValueError('non-finite corner error')
+        if details is not None:
+            details.append((ref.frame_idx,error))
         if error > worst:
             worst, worst_index = error, ref.frame_idx
     return len(rows), worst, worst_index
@@ -61,13 +69,24 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('binary', type=Path)
     parser.add_argument('dump', type=Path)
+    parser.add_argument('--stride', type=int, default=1)
+    parser.add_argument('--ok-rate-only', action='store_true')
+    parser.add_argument('--details', action='store_true', help='top ten errors and indices 107/126')
     args = parser.parse_args()
     reference.cv2.setNumThreads(1)
     try:
-        steps, error, idx = compare(args.binary, args.dump)
+        details=[]
+        steps, error, idx = compare(args.binary, args.dump,args.stride,details,args.ok_rate_only)
     except (OSError, subprocess.CalledProcessError, ValueError, KeyError) as exc:
         parser.exit(2, f'NOT VERIFIED: {exc}\n')
-    print(f'steps={steps} max_corner_error_3120={error:.9g} worst_index={idx} limit=3')
+    if args.ok_rate_only:
+        print(f'stride={args.stride} steps={steps} native_ok={error}/{steps} python_ok={idx}/{steps}')
+        return 0
+    print(f'stride={args.stride} steps={steps} max_corner_error_3120={error:.9g} worst_index={idx} limit=3')
+    if args.details:
+        print('top10='+','.join(f'{i}:{e:.9g}' for i,e in sorted(details,key=lambda d:d[1],reverse=True)[:10]))
+        for wanted in (107,126):
+            print(f'index={wanted} error_3120='+next((f'{e:.9g}' for i,e in details if i==wanted),'not_sampled'))
     return int(error > 3.)
 
 

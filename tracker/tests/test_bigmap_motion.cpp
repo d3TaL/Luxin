@@ -153,7 +153,72 @@ void chain(const Map &map) {
     auto still = map.frame(orig, true, true, true);
     for (int i = 0; i < 12; ++i) {
         s.feed(still);
-        check(s.stats.chain == final && s.stats.step.ok, "exact dead zone");
+        check(s.stats.chain == final && s.stats.step.ok, "pixel-static pose is bit-exact");
+    }
+}
+void slowMotion(const Map &map) {
+    auto sample = [](double scale, double tx) {
+        // Analytic texture avoids warpAffine's 1/32-pixel interpolation table: a
+        // 0.02px test step must not alternate between duplicate and 0.03125px frames.
+        cv::Mat image(size, CV_8U);
+        for (int y = 0; y < size.height; ++y)
+            for (int x = 0; x < size.width; ++x) {
+                const double u = (x - tx) / scale, v = y / scale;
+                const double value = 128 + 20 * std::sin(.13 * u) * std::sin(.11 * v) +
+                                     30 * std::sin(.05 * u + .09 * v) + 20 * std::cos(.07 * u - .06 * v) +
+                                     10 * std::sin(.23 * u) * std::cos(.21 * v);
+                image.at<uchar>(y, x) = cv::saturate_cast<uchar>(value);
+            }
+        return image;
+    };
+    for (bool zoom : {false, true}) {
+        Stub s;
+        s.lock(sample(1, 0));
+        for (int i = 1; i <= 100; ++i) {
+            const Pose truth = zoom ? similarity(std::pow(1.0003, i), 0, 0) : similarity(1, .02 * i, 0);
+            s.feed(sample(truth(0, 0), truth(0, 2)));
+            check(s.stats.step.ok, "slow movement must remain trackable");
+        }
+        const double expected = zoom ? std::pow(1.0003, 100) : 2.;
+        const double actual = zoom ? s.stats.chain(0, 0) : s.stats.chain(0, 2);
+        std::cout << "creep " << (zoom ? "scale" : "tx_work") << " actual=" << actual
+                  << " expected=" << expected << '\n';
+        // Image-based LK includes 8-bit quantization, unlike the exact correspondence
+        // regression below. A .05 work-px final tolerance still detects the old dead zone.
+        check(std::abs(actual - expected) < (zoom ? .0005 : .05), "subthreshold steps must accumulate");
+    }
+    for (bool zoom : {false, true}) {
+        Pose integrated = Pose::eye();
+        Points p, q;
+        for (int i = 0; i < 100; ++i)
+            p.emplace_back(30 + (i % 10) * 60, 30 + (i / 10) * 25);
+        for (auto v : p)
+            q.push_back(zoom ? v * 1.0003 : v + cv::Point2d(.02, 0));
+        for (int i = 0; i < 100; ++i) {
+            std::vector<uchar> inliers;
+            const auto step = fit(p, q, inliers);
+            check(step.ok, "exact subthreshold correspondences");
+            integrated = step.work * integrated;
+        }
+        check(std::abs((zoom ? integrated(0, 0) : integrated(0, 2)) - (zoom ? std::pow(1.0003, 100) : 2.)) <
+                  1e-9,
+              "exact creep accumulation");
+    }
+    Stub s;
+    auto original = map.frame(Pose::eye(), true, false);
+    s.lock(original);
+    const Pose initial = s.stats.chain;
+    cv::RNG rng(836);
+    for (int i = 0; i < 240; ++i) {
+        auto noisy = original.clone();
+        for (int y = 0; y < noisy.rows; ++y)
+            for (int x = 0; x < noisy.cols; ++x)
+                noisy.at<uchar>(y, x) =
+                    cv::saturate_cast<uchar>(int(original.at<uchar>(y, x)) + rng.uniform(-1, 2));
+        s.feed(noisy);
+        check(s.stats.step.ok && std::string(s.stats.step.reason) == "static_pixels" &&
+                  s.stats.chain == initial,
+              "random-sign pixel dither must not drift");
     }
 }
 void repeatAndReverse(const Map &map) {
@@ -551,6 +616,7 @@ int main(int argc, char **argv) try {
         for (int kind : {0, 1, 2})
             worst = std::max(worst, series(map, dt, kind));
     chain(map);
+    slowMotion(map);
     repeatAndReverse(map);
     loss(map);
     screen(map);

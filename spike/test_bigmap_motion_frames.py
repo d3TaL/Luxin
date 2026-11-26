@@ -51,8 +51,8 @@ class ReplayTest(unittest.TestCase):
             writer.writerow(HEADER)
             writer.writerows(self.rows)
 
-    def run_native(self, ok=True):
-        p = subprocess.run([str(BINARY),str(self.dump)], capture_output=True, text=True)
+    def run_native(self, ok=True, stride=1):
+        p = subprocess.run([str(BINARY),str(self.dump),'--stride',str(stride)], capture_output=True, text=True)
         self.assertEqual(p.returncode == 0, ok, p.stderr)
         return list(csv.DictReader(io.StringIO(p.stdout)))
 
@@ -90,6 +90,8 @@ class ReplayTest(unittest.TestCase):
         self.assertEqual(rows[4]['reason'], 'no_previous_frame')
         with self.assertRaisesRegex(ValueError, 'epoch boundary'):
             compare(BINARY, self.dump)
+        with self.assertRaisesRegex(ValueError, 'epoch boundary'):
+            compare(BINARY, self.dump, ok_rate_only=True)
         self.rows[-1][4] = 1
         self.manifest()
         with self.assertRaisesRegex(ValueError, 'no comparable fresh step'):
@@ -100,6 +102,26 @@ class ReplayTest(unittest.TestCase):
         ref = matrix(1., 0., 0., 1440, 780, 360)
         est = matrix(1.003, 0., 0., 1440, 780, 360)
         self.assertGreater(pose_corner_error_3120(est, ref, 3120, 1440), 3.)
+
+    def test_stride_selects_rows_and_preserves_timestamps(self):
+        self.burst(9, (780, 360))
+        native = self.run_native(stride=4)
+        self.assertEqual([int(r['index']) for r in native], [r[0] for r in self.rows[::4]])
+        self.assertEqual([int(r['timestampNs']) for r in native], [r[1] for r in self.rows[::4]])
+        details = []
+        steps, error, _ = compare(BINARY, self.dump, stride=4, details=details)
+        self.assertEqual(steps, 2)
+        self.assertEqual([i for i, _ in details], [r[0] for r in self.rows[4::4]])
+        self.assertLessEqual(error, 3.)
+        self.assertEqual(compare(BINARY, self.dump, stride=4, ok_rate_only=True), (2, 2, 2))
+        self.run_native(ok=False, stride=0)
+        self.run_native(ok=False, stride=100)
+        with self.assertRaisesRegex(ValueError, 'stride must be positive'):
+            compare(BINARY, self.dump, stride=0)
+        # Even a skipped row must not hide a malformed timeline.
+        self.rows[2][1] = self.rows[0][1]
+        self.manifest()
+        self.run_native(ok=False, stride=4)
 
     def test_reject_invalid_manifest_or_missing_image(self):
         self.burst(3,(780,360))

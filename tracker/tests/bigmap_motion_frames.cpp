@@ -108,12 +108,15 @@ void stripCR(std::string &line) {
 } // namespace
 
 int main(int argc, char **argv) {
-    if (argc != 2) {
-        std::cerr << "usage: bigmap_motion_frames DUMP_DIR > native.csv\n";
+    if (argc != 2 && !(argc == 4 && std::string_view(argv[2]) == "--stride")) {
+        std::cerr << "usage: bigmap_motion_frames DUMP_DIR [--stride N] > native.csv\n";
         return 2;
     }
     unsigned row = 1;
     try {
+        const unsigned stride = argc == 4 ? integer<unsigned>(argv[3]) : 1;
+        if (!stride)
+            throw std::runtime_error("stride must be positive");
         cv::setNumThreads(1);
         cv::utils::logging::setLogLevel(cv::utils::logging::LOG_LEVEL_SILENT);
         const fs::path dir(argv[1]);
@@ -131,6 +134,7 @@ int main(int argc, char **argv) {
             << std::setprecision(17);
         luxin::BigMapMotionSession session;
         Frame prev{};
+        unsigned selected = 0;
         while (std::getline(csv, line)) {
             ++row;
             stripCR(line);
@@ -139,6 +143,10 @@ int main(int argc, char **argv) {
                 throw std::runtime_error("non-monotonic index, timestamp or generation");
             if (row > 2 && (v.source_w != prev.source_w || v.source_h != prev.source_h))
                 session.reset();
+            prev = v;
+            if ((row - 2) % stride)
+                continue;
+            ++selected;
             auto img = image(dir, v);
             luxin::BigMapMotionStats stats;
             const auto start = Clock::now();
@@ -156,9 +164,8 @@ int main(int argc, char **argv) {
             std::cout << ',' << verdict(stats.controls[0].verdict) << ',' << verdict(stats.controls[1].verdict)
                       << ',' << stats.overlay_hidden << ',' << step.lk_ms << ',' << step.ransac_ms << ',' << ms
                       << '\n';
-            prev = std::move(v);
         }
-        if (!csv.eof() || csv.bad() || row < 3)
+        if (!csv.eof() || csv.bad() || selected < 2)
             throw std::runtime_error("incomplete burst (need >=2 frames)");
         if (!std::cout.flush())
             throw std::runtime_error("cannot write output");
