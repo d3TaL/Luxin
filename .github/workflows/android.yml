@@ -23,10 +23,29 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libopencv-dev
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libopencv-dev python3-opencv
+      - run: pkg-config --modversion opencv4
       - run: cmake -S tracker -B tracker/build-debug -DCMAKE_BUILD_TYPE=Debug
-      - run: cmake --build tracker/build-debug --target test_bigmap_session test_bigmap_geometry test_bigmap_motion -j2
+      - run: cmake --build tracker/build-debug --target test_bigmap_session test_bigmap_geometry test_bigmap_motion bigmap_motion_frames -j2
       - run: ctest --test-dir tracker/build-debug --output-on-failure -R '^(test_bigmap_session|test_bigmap_geometry|test_bigmap_motion)$'
+      - run: /usr/bin/python3 -I spike/test_bigmap_motion_frames.py tracker/build-debug/bigmap_motion_frames
+
+  bigmap-motion-tsan:
+    name: Big-map worker (ThreadSanitizer, x86_64)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libopencv-dev
+      - run: >-
+          cmake -S tracker -B tracker/build-tsan -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=thread
+      - run: cmake --build tracker/build-tsan --target test_bigmap_motion -j2
+      - run: tracker/build-tsan/test_bigmap_motion --worker-only
+        env:
+          TSAN_OPTIONS: halt_on_error=1
 
   build:
     name: Build Debug APK (with Android NDK & OpenCV 4.10)

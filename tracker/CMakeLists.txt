@@ -86,6 +86,9 @@ if(LUXIN_BUILD_TESTS AND NOT ANDROID)
     target_link_libraries(test_bigmap_motion PRIVATE luxin_tracker)
     add_test(NAME test_bigmap_motion COMMAND test_bigmap_motion)
 
+    add_executable(bigmap_motion_frames tests/bigmap_motion_frames.cpp)
+    target_link_libraries(bigmap_motion_frames PRIVATE luxin_tracker)
+
     add_executable(test_bigmap_follow_mask tests/test_bigmap_follow_mask.cpp)
     target_link_libraries(test_bigmap_follow_mask PRIVATE luxin_tracker)
     add_test(NAME test_bigmap_follow_mask COMMAND test_bigmap_follow_mask)

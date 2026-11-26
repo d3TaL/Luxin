@@ -13,6 +13,7 @@ research/tools/
 
 # Experiment output
 spike/out/
+spike/data/
 
 # Downloaded map tiles and stitched reference images
 research/tiles_cache/

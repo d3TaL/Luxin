@@ -1,5 +1,12 @@
 # Журнал изменений — Branch `feat/bigmap-detection-fable`
 
+## `feat/bigmap-lk-tracking` — этап 2: desktop replay
+
+- `bigmap_motion_frames` воспроизводит `frames.csv` + PNG, выдаёт относительную позу, шаг,
+  решения обеих контрольных областей и время ядра. Добавлены [команда сравнения с Python и описание CSV](research/bigmap_motion_tracking.md#этап-2-воспроизведение-локального-дампа).
+- В CI добавлены сквозные тесты replay на процедурном дампе и отдельный x86_64 TSan-job
+  для `test_bigmap_motion --worker-only`. Допуски и нативное ядро не изменены.
+
 ## `feat/bigmap-lk-tracking` — этап 1: нативное ядро MOTION
 
 - Отдельная `BigMapMotionSession`: LK/3-DOF по соседним кадрам, мосты, накопление позы,
