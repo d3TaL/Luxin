@@ -22,7 +22,8 @@ class TrackingLogFilterTest {
         for (stage in listOf("abs_request", "abs_result", "abs_apply", "abs_conflict", "lost"))
             assertTrue(TrackingLogFilter.sanitize(native("BigMapMotion stage=$stage outcome=suspect jumpPx=150 conflicts=1"), pid)!!.contains("stage=$stage"))
         val control = "BigMapMotion stage=control roi=0 outcome=unverifiable screenFixed=0 coverage=1 " +
-            "warpedResidual=6.7 fixedResidual=18.5 warpedFrac=0.05 fixedFrac=0.26"
+            "warpedResidual=6.7 fixedResidual=18.5 warpedFrac=0.05 fixedFrac=0.26 " +
+            "staticLatchFrames=2 staticReleaseFrames=0 latchReason=static_latch_pending"
         assertTrue(TrackingLogFilter.sanitize(native(control), pid)!!.endsWith(control))
         assertTrue(TrackingLogFilter.sanitize(native("BigMapMotion stage=init opencv=4.10.0"), pid)!!.contains("opencv=4.10.0"))
         val unsafe = TrackingLogFilter.sanitize(native("BigMapMotion stage=init opencv=/data/private uid=123 x=42 matrix=[1,0]"), pid)!!

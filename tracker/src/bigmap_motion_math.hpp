@@ -13,4 +13,11 @@ Pose predict(const Pose &previous, double dt_ratio, cv::Size size);
 Pose correction(const Pose &snapshot_chain, const Pose &absolute);
 BigMapMotionStep fit(const Points &src, const Points &dst, std::vector<uchar> &inliers);
 void requireFixedAdvantage(MotionControlObservation& observation, bool moving);
+bool controlMoving(const Pose &step, cv::Size work_size);
+struct ControlLatch {
+    bool hidden = false;
+    int strong = 0, clean = 0;
+    void observe(MotionControlObservation &observation, bool moving);
+};
+void classifyControl(MotionControlObservation &observation, bool moving);
 } // namespace luxin::motion

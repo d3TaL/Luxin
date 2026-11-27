@@ -1,6 +1,9 @@
 #include "../src/bigmap_motion_math.hpp"
 
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <iostream>
 #include <stdexcept>
 #include <opencv2/imgproc.hpp>
@@ -408,9 +411,50 @@ void panelProbe(const Map &map, bool trace) {
           "first observable movement hides screen-fixed panel");
     check(!frame(0, true, 33), "stationary identical panel cannot clear latch");
     check(!frame(0, false, 33), "closing transition remains hidden");
-    check(!frame(0, false, 33), "stationary clean map cannot clear latch");
+    check(!frame(0, false, 33), "first stationary map after closing");
+    check(frame(0, false, 33), "second stationary map releases latch");
     check(frame(-8, false, 33) && s.stats.controls[0].verdict == ControlVerdict::Map,
           "first moving map restores publication");
+}
+void staticPanel(const Map &map) {
+    Stub s;
+    auto clean = map.frame(), panel = clean.clone();
+    panel(cv::Rect(500,125,50,110)).setTo(0);
+    s.lock(clean);
+    for (int i = 1; i <= 6; ++i) {
+        auto r = s.feed(panel);
+        check(s.stats.controls[1].static_latch_frames == std::min(i,3) &&
+              r.geometry.matrix.empty() == (i >= 3), "still panel persists against pre-opening map");
+    }
+    check(s.feed(clean).geometry.matrix.empty(), "first clean observation after still panel");
+    check(s.feed(clean).phase == "tracking", "second clean observation releases still panel");
+}
+void controlLog(const std::filesystem::path &path) {
+    std::ifstream file(path);
+    std::string line;
+    std::getline(file,line); // header
+    std::array<ControlLatch,2> state{};
+    int rows = 0, overlays = 0, last = -1;
+    while (std::getline(file,line)) {
+        std::istringstream row(line);
+        int index, roi, fixed, verdict;
+        double scale, tx, ty;
+        MotionControlObservation c;
+        check(bool(row >> index >> roi >> scale >> tx >> ty >> c.coverage >> c.warped_residual >> c.fixed_residual
+                       >> c.warped_changed_fraction >> c.fixed_changed_fraction >> fixed >> verdict) && roi == rows%2,
+              "numeric log row");
+        if (roi == 0 && index != last + 1) state = {};
+        last = index;
+        const bool moving = controlMoving(similarity(scale,tx,ty),size);
+        classifyControl(c,moving);
+        check(int(c.verdict) == verdict && c.screen_fixed == bool(fixed), "reproduce phone observation");
+        state[roi].observe(c,moving);
+        check(!state[roi].hidden, "no phone overlay latch");
+        overlays += verdict == 2;
+        ++rows;
+    }
+    check(file.eof() && rows > 0 && overlays == 14, "all fourteen overlay observations included");
+    std::cout << "phone control observations=" << rows << " overlays=" << overlays << " hidden=0\n";
 }
 void independentControls(const Map &map) {
     Stub s;
@@ -668,6 +712,10 @@ void workerRace(const Map &map) {
 
 int main(int argc, char **argv) try {
     cv::setNumThreads(1);
+    if (argc == 3 && std::string(argv[1]) == "--control-log") {
+        controlLog(argv[2]);
+        return 0;
+    }
     Map map;
     if (argc == 2 && std::string(argv[1]) == "--worker-only") {
         workerRace(map);
@@ -693,6 +741,8 @@ int main(int argc, char **argv) try {
     cleanControls(map);
     independentControls(map);
     panelProbe(map, false);
+    staticPanel(map);
+    controlLog(std::filesystem::path(__FILE__).parent_path() / "data/motion_control_phone.txt");
     corrections(map);
     budget(map, false);
     budget(map, true);

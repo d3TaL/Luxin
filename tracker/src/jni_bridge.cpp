@@ -200,8 +200,8 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeBigMapMotionUpdate(
         for(size_t i=0;i<stats.controls.size();++i) {
             const auto& c=stats.controls[i];
             const char* verdict=c.verdict==luxin::ControlVerdict::Map?"map":c.verdict==luxin::ControlVerdict::Overlay?"overlay":"unverifiable";
-            LOGI("BigMapMotion stage=control tsNs=%lld roi=%d outcome=%s screenFixed=%d coverage=%.6f warpedResidual=%.6f fixedResidual=%.6f warpedFrac=%.6f fixedFrac=%.6f",
-                 (long long)timestamp_ns,(int)i,verdict,c.screen_fixed,c.coverage,c.warped_residual,c.fixed_residual,c.warped_changed_fraction,c.fixed_changed_fraction);
+             LOGI("BigMapMotion stage=control tsNs=%lld roi=%d outcome=%s screenFixed=%d coverage=%.6f warpedResidual=%.6f fixedResidual=%.6f warpedFrac=%.6f fixedFrac=%.6f staticLatchFrames=%d staticReleaseFrames=%d latchReason=%s",
+                  (long long)timestamp_ns,(int)i,verdict,c.screen_fixed,c.coverage,c.warped_residual,c.fixed_residual,c.warped_changed_fraction,c.fixed_changed_fraction,c.static_latch_frames,c.static_release_frames,c.latch_reason);
         }
         std::ostringstream out; out.imbue(std::locale::classic());
         out<<std::setprecision(17)<<"{\"version\":2,\"mode\":"<<jsonString(g.mode)<<",\"phase\":"<<jsonString(result.phase);

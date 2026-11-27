@@ -142,6 +142,34 @@ void requireFixedAdvantage(MotionControlObservation &c, bool moving) {
         c.verdict = ControlVerdict::Unverifiable;
 }
 
+void classifyControl(MotionControlObservation &c, bool moving) {
+    c.verdict = ControlVerdict::Unverifiable;
+    c.screen_fixed = false;
+    if (!(c.coverage >= .90)) return;
+    const auto matches = [moving](double mean, double frac) {
+        return mean >= 0 && mean <= (moving ? 12. : 6.) && frac >= 0 && frac <= .04;
+    };
+    c.verdict = matches(c.warped_residual, c.warped_changed_fraction) ? ControlVerdict::Map : ControlVerdict::Overlay;
+    c.screen_fixed = moving && c.verdict == ControlVerdict::Overlay && matches(c.fixed_residual, c.fixed_changed_fraction);
+    requireFixedAdvantage(c, moving);
+}
+
+void ControlLatch::observe(MotionControlObservation &c, bool moving) {
+    // Provisional: the phone log contains map negatives but no labelled panel opening.
+    constexpr int kStaticLatchFrames = 3, kStaticReleaseFrames = 2;
+    constexpr double kStaticLatchFraction = .25, kStaticLatchResidual = 8.;
+    strong = !moving && c.verdict == ControlVerdict::Overlay && c.warped_changed_fraction >= kStaticLatchFraction &&
+             c.warped_residual >= kStaticLatchResidual ? std::min(strong + 1, kStaticLatchFrames) : 0;
+    clean = hidden && !moving && c.verdict == ControlVerdict::Map ? std::min(clean + 1, kStaticReleaseFrames) : 0;
+    if (moving && c.verdict != ControlVerdict::Unverifiable) hidden = c.verdict == ControlVerdict::Overlay;
+    if (strong == kStaticLatchFrames) hidden = true;
+    if (clean == kStaticReleaseFrames) hidden = false;
+    c.static_latch_frames = strong;
+    c.static_release_frames = clean;
+    c.latch_reason = strong == kStaticLatchFrames ? "static_latch" : strong ? "static_latch_pending" :
+                     clean == kStaticReleaseFrames ? "static_release" : clean ? "static_release_pending" : "none";
+}
+
 namespace {
 cv::Mat gray360(const cv::Mat &frame) {
     cv::Mat gray, small;
@@ -275,7 +303,6 @@ double maxTravel(const Pose &m, cv::Size size) {
         }
     return maximum;
 }
-constexpr double kControlCoverage = .90, kControlMotionPx = 2.;
 const std::array<cv::Rect, 2> kControls = {cv::Rect(2790, 500, 170, 450), cv::Rect(2020, 540, 120, 350)};
 
 MotionControlObservation observeControl(cv::Rect base, const cv::Mat &prev, const cv::Mat &now,
@@ -320,17 +347,7 @@ MotionControlObservation observeControl(cv::Rect base, const cv::Mat &prev, cons
         result.warped_changed_fraction = double(changed) / count;
         result.fixed_changed_fraction = double(fixed_changed) / count;
     }
-    if (result.coverage < kControlCoverage)
-        return result;
-    auto matches = [&](double total, int different) {
-        return total <= count * (moving ? 12. : 6.) && different <= .04 * count;
-    };
-    result.verdict = matches(sum, changed) ? ControlVerdict::Map : ControlVerdict::Overlay;
-    result.screen_fixed =
-        moving && result.verdict == ControlVerdict::Overlay && matches(fixed_sum, fixed_changed);
-    // A poor map warp alone is not evidence of a screen-fixed panel (LOD/text redraw
-    // and scale resampling also cause outliers). Both error measures must favour fixed UI.
-    requireFixedAdvantage(result, moving);
+    classifyControl(result, moving);
     return result;
 }
 bool validSimilarity(const Pose &p) {
@@ -405,6 +422,7 @@ struct Epoch {
     }
 };
 } // namespace
+bool controlMoving(const Pose &step, cv::Size work_size) { return maxTravel(step, work_size) >= 2.; }
 } // namespace luxin::motion
 
 namespace luxin {
@@ -416,8 +434,11 @@ struct BigMapMotionSession::State {
     int64_t last_ts = -1;
     Epoch e;
     // Tracking loss/rebase or a delayed absolute result cannot clear an overlay latch.
-    // Only a new capture context or a moving Map observation of that same ROI can.
-    std::array<bool, 2> overlay{};
+    std::array<ControlLatch, 2> overlay{};
+    // Immutable grayscale immediately before strong evidence, for a still panel
+    // whose appearance changes just once. Each ROI owns its own short-lived baseline.
+    struct ControlBase { cv::Mat gray; Pose to_now = Pose::eye(); };
+    std::array<ControlBase, 2> control_base{};
     std::optional<Snapshot> snapshot;
     std::future<BigMapGeometry> worker;
     bool debug_points = false;
@@ -425,6 +446,8 @@ struct BigMapMotionSession::State {
     void invalidate(bool new_context = true) {
         ++epoch;
         e = {};
+        control_base = {};
+        for (auto &c : overlay) c.clean = c.strong = 0;
         if (new_context)
             overlay = {};
         snapshot.reset(); // keep the future: replacing an unfinished async future would join it
@@ -673,19 +696,27 @@ struct BigMapMotionSession::State {
         collect(gray, ts, out);
         if (before != epoch && !out.bridge)
             return r;
-        if (!previous_gray.empty() && out.step.ok && !out.bridge) {
-            const bool moving = maxTravel(out.step.work, gray.size()) >= kControlMotionPx;
-            const Pose inv = out.step.work.inv();
-            for (size_t i = 0; i < kControls.size(); ++i) {
-                out.controls[i] =
-                    observeControl(kControls[i], previous_gray, gray, e.masks.control_source, inv, moving);
-                if (out.controls[i].verdict == ControlVerdict::Overlay)
-                    overlay[i] = true;
-                else if (moving && out.controls[i].verdict == ControlVerdict::Map)
-                    overlay[i] = false;
+        const bool adjacent = !previous_gray.empty() && out.step.ok && !out.bridge;
+        const bool moving = adjacent && controlMoving(out.step.work, gray.size());
+        for (size_t i = 0; i < kControls.size(); ++i) {
+            auto &base = control_base[i];
+            if (!adjacent || moving) base = {};
+            if (adjacent) {
+                base.to_now = out.step.work * base.to_now;
+                if (!base.gray.empty() && controlMoving(base.to_now, gray.size())) {
+                    base = {};
+                    overlay[i].strong = overlay[i].clean = 0;
+                    base.to_now = out.step.work;
+                }
+                out.controls[i] = observeControl(kControls[i], base.gray.empty() ? previous_gray : base.gray,
+                    gray, e.masks.control_source, base.to_now.inv(), moving);
             }
+            const bool was_hidden = overlay[i].hidden;
+            overlay[i].observe(out.controls[i], moving);
+            if (!was_hidden && overlay[i].strong && base.gray.empty()) base.gray = previous_gray;
+            if (base.gray.empty() || (!overlay[i].strong && !overlay[i].hidden)) base = {};
         }
-        out.overlay_hidden = overlay[0] || overlay[1];
+        out.overlay_hidden = overlay[0].hidden || overlay[1].hidden;
         if (e.target && e.applied && *e.applied != *e.target) {
             const double f = e.blend_frames ? 1. / e.blend_frames-- : -std::expm1(-interval * 1e-9 / kTau);
             e.applied = interpolate(*e.applied, *e.target, f);

@@ -29,11 +29,12 @@ internal object TrackingLogFilter {
         "frac", "inputAgeMs", "readMs", "bitmapMs", "gateMs", "callDecodeMs", "nativeMs", "ageMs",
         "actualFps", "targetFps", "version", "ok", "corners", "tracked", "scaleStep", "txStep", "tyStep",
         "lkMs", "ransacMs", "totalMs", "pathSinceAbs", "zoomSinceAbs", "absAgeS", "bridge", "chainEpoch",
-        "hidden", "jumpPx", "conflicts", "screenFixed", "coverage", "warpedResidual", "fixedResidual", "warpedFrac", "fixedFrac"
+        "hidden", "jumpPx", "conflicts", "screenFixed", "coverage", "warpedResidual", "fixedResidual", "warpedFrac", "fixedFrac",
+        "staticLatchFrames", "staticReleaseFrames"
     )
     private val booleanKeys = setOf("visibility", "resetBigMap", "resetAll", "obsolete", "blocked", "geometry")
     private val enumKeys = setOf("stage", "phase", "mode", "reset", "reason", "follow", "settle",
-        "outcome", "pixelOutcome", "refresh", "waiting", "screen", "lifecycle", "invalidate")
+        "outcome", "pixelOutcome", "refresh", "waiting", "screen", "lifecycle", "invalidate", "latchReason")
     private val enumValues = setOf(
         "none", "begin", "before_absolute", "return", "native_return", "checked", "publish",
         "publish_dropped", "error", "reset", "tracking", "confirming", "moving", "acquiring",
@@ -52,7 +53,7 @@ internal object TrackingLogFilter {
         "lost", "map", "overlay", "unverifiable", "static_pixels", "no_previous_frame", "insufficient_corners",
         "insufficient_fb_matches", "degenerate_inliers", "bridge_expired", "invalid_chain", "invalid_frame",
         "invalid_timestamp", "old_generation", "search_failed", "space_change", "suspect", "initial", "blend_small",
-        "blend_three", "tracker_mode", "ok", "screen_change"
+        "blend_three", "tracker_mode", "ok", "screen_change", "static_latch", "static_latch_pending", "static_release", "static_release_pending"
     )
     private val nativeKinds = setOf("BigMap", "BigMapFollow", "BigMapControl", "BigMapV2", "BigMapSnapshot", "BigMapMotion")
 
