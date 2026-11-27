@@ -132,7 +132,8 @@ int main(int argc, char **argv) {
                "step_scale,step_tx_3120,step_ty_3120,cum_scale,cum_tx_3120,cum_ty_3120,"
                "roi_right,roi_inner,overlay_hidden,lk_ms,ransac_ms,update_ms,"
                "right_screen_fixed,right_warped_residual,right_fixed_residual,right_warped_changed_fraction,right_fixed_changed_fraction,"
-               "inner_screen_fixed,inner_warped_residual,inner_fixed_residual,inner_warped_changed_fraction,inner_fixed_changed_fraction\n"
+                "inner_screen_fixed,inner_warped_residual,inner_fixed_residual,inner_warped_changed_fraction,inner_fixed_changed_fraction,"
+                "fallback_tried,fallback_ok,fallback_inliers,fallback_matches,fallback_scale,fallback_ms,lost,recovery_ms\n"
             << std::setprecision(17);
         luxin::BigMapMotionSession session;
         Frame prev{};
@@ -168,7 +169,9 @@ int main(int argc, char **argv) {
             for (const auto& c : stats.controls)
                 std::cout << ',' << c.screen_fixed << ',' << c.warped_residual << ',' << c.fixed_residual
                           << ',' << c.warped_changed_fraction << ',' << c.fixed_changed_fraction;
-            std::cout << '\n';
+            std::cout << ',' << step.fallback_tried << ',' << step.fallback_ok << ',' << step.fallback_inliers
+                      << ',' << step.fallback_matches << ',' << step.fallback_scale << ',' << step.fallback_ms
+                      << ',' << stats.lost << ',' << stats.recovery_ms << '\n';
         }
         if (!csv.eof() || csv.bad() || selected < 2)
             throw std::runtime_error("incomplete burst (need >=2 frames)");

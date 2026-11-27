@@ -5,7 +5,9 @@
 #include <cmath>
 #include <deque>
 #include <optional>
+#include <numeric>
 #include <random>
+#include <opencv2/features2d.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/video/tracking.hpp>
 #ifdef __linux__
@@ -37,7 +39,8 @@ Pose correction(const Pose &snapshot_chain, const Pose &absolute) {
     return snapshot_chain.inv() * absolute;
 }
 
-BigMapMotionStep fit(const Points &p, const Points &q, std::vector<uchar> &mask) {
+static BigMapMotionStep fitRange(const Points &p, const Points &q, std::vector<uchar> &mask,
+                                 double min_scale, double max_scale, int iterations) {
     BigMapMotionStep r;
     const int n = r.matches = static_cast<int>(p.size());
     mask.assign(n, 0);
@@ -67,14 +70,14 @@ BigMapMotionStep fit(const Points &p, const Points &q, std::vector<uchar> &mask)
         return count;
     };
     r.reason = "insufficient_inliers";
-    for (int iter = 0; iter < 300; ++iter) {
+    for (int iter = 0; iter < iterations; ++iter) {
         const int i = first(rng), j = (i + offset(rng)) % n;
         const auto dp = p[j] - p[i];
         const double denom = dp.dot(dp);
         if (denom < 25)
             continue;
         const double s = dp.dot(q[j] - q[i]) / denom;
-        if (!(s >= .5 && s <= 2))
+        if (!(s >= min_scale && s <= max_scale))
             continue;
         const auto t = .5 * (q[i] + q[j] - s * (p[i] + p[j]));
         double cost;
@@ -108,7 +111,7 @@ BigMapMotionStep fit(const Points &p, const Points &q, std::vector<uchar> &mask)
             return r;
         }
         const double s = numerator / denom;
-        if (!(s >= .5 && s <= 2)) {
+        if (!(s >= min_scale && s <= max_scale)) {
             r.reason = "scale_bounds";
             return r;
         }
@@ -132,6 +135,10 @@ BigMapMotionStep fit(const Points &p, const Points &q, std::vector<uchar> &mask)
     r.ok = true;
     r.reason = "ok";
     return r;
+}
+
+BigMapMotionStep fit(const Points &p, const Points &q, std::vector<uchar> &mask) {
+    return fitRange(p,q,mask,.5,2.,300);
 }
 
 void requireFixedAdvantage(MotionControlObservation &c, bool moving) {
@@ -232,7 +239,7 @@ bool staticPixels(const cv::Mat &prev, const cv::Mat &now, const cv::Mat &mask) 
             return false;
     return true;
 }
-BigMapMotionStep track(const cv::Mat &prev, const cv::Mat &now, const Masks &masks,
+BigMapMotionStep trackLK(const cv::Mat &prev, const cv::Mat &now, const Masks &masks,
                        const std::optional<Pose> &prediction, bool debug_points = false) {
     auto start = Clock::now();
     std::vector<cv::Point2f> points;
@@ -355,6 +362,62 @@ bool validSimilarity(const Pose &p) {
     return cv::checkRange(cv::Mat(p)) && std::isfinite(scale * scale) && scale > 1e-8 &&
            std::abs(p(0, 0) - p(1, 1)) <= 1e-6 * scale && std::abs(p(1, 0) + p(0, 1)) <= 1e-6 * scale;
 }
+
+BigMapMotionStep track(const cv::Mat &prev, const cv::Mat &now, const Masks &masks,
+                       const std::optional<Pose> &prediction, bool debug_points) {
+    auto r = trackLK(prev, now, masks, prediction, debug_points);
+    if (r.ok) return r;
+    const auto start = Clock::now();
+    r.fallback_tried = true;
+    auto sift = cv::SIFT::create(1500);
+    std::vector<cv::KeyPoint> kp[2];
+    cv::Mat desc[2];
+    sift->detectAndCompute(prev, masks.ui, kp[0], desc[0]);
+    sift->detectAndCompute(now, masks.ui, kp[1], desc[1]);
+    Points p,q;
+    if (!desc[0].empty() && desc[1].rows >= 2) {
+        std::vector<std::vector<cv::DMatch>> pairs;
+        cv::BFMatcher(cv::NORM_L2).knnMatch(desc[0],desc[1],pairs,2);
+        // Repeated query features cannot vote multiple times for one destination.
+        std::vector<cv::DMatch> best(desc[1].rows);
+        for (const auto &v : pairs)
+            if (v.size() == 2 && v[0].distance < .75 * v[1].distance && v[0].distance < best[v[0].trainIdx].distance)
+                best[v[0].trainIdx] = v[0];
+        for (auto m : best) if (m.queryIdx >= 0) {
+            p.push_back(kp[0][m.queryIdx].pt);
+            q.push_back(kp[1][m.trainIdx].pt);
+        }
+    }
+    std::vector<uchar> inliers;
+    auto b = fitRange(p,q,inliers,.3,3.5,1000);
+    r.fallback_matches = b.matches;
+    r.fallback_inliers = b.inliers;
+    r.fallback_scale = b.inliers ? b.work(0,0) : 0;
+    if (b.ok && b.inliers >= 24 && b.inliers >= .45 * b.matches && validSimilarity(b.work) &&
+        !competingFallback(p,q,inliers,b,now.size())) {
+        // Guard against a single icon or compact repeated decoration defining a map pose.
+        std::vector<cv::Point2f> source,destination;
+        for (size_t i=0; i<p.size(); ++i) if (inliers[i]) {
+            source.emplace_back(p[i]); destination.emplace_back(q[i]);
+        }
+        auto supported = [&](const auto &points) {
+            std::vector<cv::Point2f> hull;
+            cv::convexHull(points,hull);
+            return cv::contourArea(hull) >= .008 * now.total();
+        };
+        if (supported(source) && supported(destination)) {
+            r.fallback_ok = r.ok = true;
+            r.work = b.work; r.matches = b.matches; r.inliers = b.inliers; r.error_px = b.error_px;
+            r.reason = "sift_fallback";
+            if (debug_points) {
+                destination.resize(std::min<size_t>(48,destination.size()));
+                r.debug_points = std::move(destination);
+            }
+        }
+    }
+    r.fallback_ms = elapsed(start);
+    return r;
+}
 double scaleOf(const Pose &p) {
     return std::hypot(p(0, 0), p(1, 0));
 }
@@ -390,6 +453,8 @@ struct Snapshot {
     int64_t ts;
     cv::Mat gray;
     bool connected;
+    bool bound;
+    std::optional<Pose> expected; // K -> snapshot, retained solely for cross-epoch conflict checking
 };
 struct Suspicion {
     int64_t ts;
@@ -400,8 +465,8 @@ struct Epoch {
     cv::Mat good;
     Masks masks;
     Pose chain = Pose::eye(), previous = Pose::eye();
-    int64_t good_ts = -1, previous_dt = 0, request_ts = -1, abs_ts = -1, lost_ts = -1;
-    int failures = 0, blend_frames = 0;
+    int64_t good_ts = -1, previous_dt = 0, request_ts = -1, abs_ts = -1;
+    int failures = 0, blend_frames = 0, fallback_streak = 0;
     bool urgent = false;
     bool budget_was_exceeded = false;
     double path = 0, zoom = 0, abs_path = 0, abs_zoom = 0;
@@ -423,6 +488,48 @@ struct Epoch {
 };
 } // namespace
 bool controlMoving(const Pose &step, cv::Size work_size) { return maxTravel(step, work_size) >= 2.; }
+bool competingFallback(const Points &p, const Points &q, const std::vector<uchar> &mask,
+                       const BigMapMotionStep &winner, cv::Size size) {
+    const int competing = std::max(12, int(std::ceil(.75 * winner.inliers)));
+    std::vector<int> outside;
+    for (size_t i=0; i<p.size(); ++i) if (!mask[i]) outside.push_back(int(i));
+    if (outside.empty()) return false;
+    // Seed from non-winner votes but score ALL matches: two different zooms can
+    // agree in the centre and disagree strongly near the frame boundaries.
+    const Pose inverse = winner.work.inv();
+    std::mt19937 rng(42);
+    std::uniform_int_distribution<int> any(0,int(p.size())-1);
+    for (int k=0;k<1000;++k) {
+        const int i=outside[k%outside.size()], j=any(rng);
+        const auto dp=p[i]-p[j]; const double length=dp.dot(dp);
+        if (length<25) continue;
+        const double s=dp.dot(q[i]-q[j])/length;
+        if (!(s>=.3 && s<=3.5)) continue;
+        const auto t=.5*(q[i]+q[j]-s*(p[i]+p[j]));
+        if (maxTravel(similarity(s,t.x,t.y)*inverse,size)<=4.) continue;
+        Points seed_p,seed_q;
+        for (size_t n=0;n<p.size();++n) {
+            const auto d=s*p[n]+t-q[n];
+            if (d.dot(d)<=4.) { seed_p.push_back(p[n]); seed_q.push_back(q[n]); }
+        }
+        if (int(seed_p.size())<competing) continue;
+        // Refit the consensus; a noisy two-point seed for the original model
+        // is not a distinct hypothesis when its least-squares fit agrees.
+        const auto pm=std::accumulate(seed_p.begin(),seed_p.end(),cv::Point2d{})*(1./seed_p.size());
+        const auto qm=std::accumulate(seed_q.begin(),seed_q.end(),cv::Point2d{})*(1./seed_q.size());
+        double num=0,den=0;
+        for(size_t n=0;n<seed_p.size();++n){const auto d=seed_p[n]-pm; num+=d.dot(seed_q[n]-qm); den+=d.dot(d);}
+        if (den<25.) continue;
+        const double sr=num/den; const auto tr=qm-sr*pm;
+        if (sr<.3 || sr>3.5 || maxTravel(similarity(sr,tr.x,tr.y)*inverse,size)<=4.) continue;
+        int count=0, unique=0;
+        for (size_t n=0;n<p.size();++n) {
+            const auto d=sr*p[n]+tr-q[n]; if(d.dot(d)<=4.) { ++count; unique+=!mask[n]; }
+        }
+        if (count>=competing && unique>=2) return true;
+    }
+    return false;
+}
 } // namespace luxin::motion
 
 namespace luxin {
@@ -432,6 +539,7 @@ struct BigMapMotionSession::State {
     Launch launch;
     uint64_t epoch = 1, generation = 0;
     int64_t last_ts = -1;
+    int64_t first_failure = -1;
     Epoch e;
     // Tracking loss/rebase or a delayed absolute result cannot clear an overlay latch.
     std::array<ControlLatch, 2> overlay{};
@@ -440,17 +548,22 @@ struct BigMapMotionSession::State {
     struct ControlBase { cv::Mat gray; Pose to_now = Pose::eye(); };
     std::array<ControlBase, 2> control_base{};
     std::optional<Snapshot> snapshot;
+    std::string bound_space; // survives a tracking rebase, never a capture/context reset
     std::future<BigMapGeometry> worker;
     bool debug_points = false;
 
-    void invalidate(bool new_context = true) {
+    void invalidate(bool new_context = true, bool tracking_loss = false) {
         ++epoch;
         e = {};
         control_base = {};
         for (auto &c : overlay) c.clean = c.strong = 0;
         if (new_context)
             overlay = {};
-        snapshot.reset(); // keep the future: replacing an unfinished async future would join it
+        if (!tracking_loss) {
+            first_failure = -1;
+            bound_space.clear();
+            snapshot.reset(); // keep future: reset/pause/resize can never be bridged
+        }
     }
     Pose toFrame(Pose p) const {
         return changeUnits(p, double(e.size.width) / e.masks.ui.cols, double(e.size.height) / e.masks.ui.rows);
@@ -502,7 +615,7 @@ struct BigMapMotionSession::State {
         const bool slow = out.step.ok && maxTravel(out.step.work, gray.size()) <= kSlow;
         const int64_t age = ts - e.request_ts;
         if (!e.urgent && e.request_ts >= 0) {
-            if (!e.applied || e.lost_ts >= 0 || e.overBudget()) {
+            if (!e.applied || e.failures || e.overBudget()) {
                 if (age < kRetry)
                     return;
             } else if (age < kRefresh || !slow)
@@ -517,7 +630,8 @@ struct BigMapMotionSession::State {
         e.urgent = false;
         worker = launch(std::move(owned), refs, ts * 1e-9);
         if (worker.valid()) {
-            snapshot = Snapshot{epoch, ts, gray, connected};
+            snapshot = Snapshot{epoch, ts, gray, connected, bool(e.applied),
+                                e.applied && connected ? std::optional<Pose>(e.chain * *e.applied) : std::nullopt};
             out.requested = true;
         }
     }
@@ -550,11 +664,11 @@ struct BigMapMotionSession::State {
         e.suspect.reset();
         e.target = candidate;
         e.identity = a;
+        bound_space = a.space;
         // Charge motion that happened AFTER this snapshot, even if SIFT took seconds.
         e.abs_ts = sample.ts;
         e.abs_path = sample.path;
         e.abs_zoom = sample.zoom;
-        e.lost_ts = -1;
         return true;
     }
     void collect(const cv::Mat &gray, int64_t ts, BigMapMotionStats &out) {
@@ -567,11 +681,18 @@ struct BigMapMotionSession::State {
             a = worker.get();
         } catch (const std::exception &) {
             out.absolute = "search_failed";
+            out.abs_reason = "search_failed";
             return;
         }
         out.absolute = "discarded";
-        if (!snap || snap->epoch != epoch || a.mode != "found" || a.timestamp_seconds != snap->ts * 1e-9 ||
-            a.frame_width != e.size.width || a.frame_height != e.size.height || a.space.empty() ||
+        if (!snap) { out.abs_reason = "epoch_mismatch"; return; }
+        if (a.mode != "found") { out.abs_reason = "not_found"; return; }
+        if (a.timestamp_seconds != snap->ts * 1e-9 || a.frame_width != e.size.width || a.frame_height != e.size.height) {
+            out.abs_reason = "frame_mismatch"; return;
+        }
+        if (ts <= snap->ts || ts - snap->ts > kRetain) { out.abs_reason = "retain_expired"; return; }
+        out.abs_reason = "invalid";
+        if (a.space.empty() ||
             a.reference.empty() || a.inliers < kMin || a.matches < a.inliers ||
             !(a.support >= 0 && a.support <= 1) || !std::isfinite(a.error_px) || a.error_px < 0 ||
             a.matrix.type() != CV_64F || a.matrix.size() != cv::Size(3, 2))
@@ -582,28 +703,37 @@ struct BigMapMotionSession::State {
                 abs(i, j) = a.matrix.at<double>(i, j);
         if (!validSimilarity(abs))
             return;
-        if (e.applied && e.identity.space != a.space) {
+        if (!bound_space.empty() && bound_space != a.space) {
             invalidate(false);
             out.bridge = false;
             out.step.ok = false;
             out.step.reason = "space_change";
             out.absolute = "space_change";
+            out.abs_reason = "space_change";
             return;
         }
         auto it =
             std::find_if(e.history.begin(), e.history.end(), [&](const Sample &s) { return s.ts == snap->ts; });
-        if (snap->connected && it != e.history.end() && e.lost_ts < 0) {
+        if (snap->epoch == epoch && snap->connected && it != e.history.end() && e.good_ts == ts) {
+            out.abs_reason = "continuous";
             adopt(correction(it->chain, abs), a, *it, out);
             return;
         }
         // No continuous chain. A fresh snapshot-to-current LK measurement is required;
         // never stamp the absolute result with the consumption time. Rebase only on success.
-        if (ts <= snap->ts || ts - snap->ts > kRetain || (!snap->connected && e.lost_ts < 0))
-            return;
         auto bridge = track(snap->gray, gray, e.masks, prediction(ts - snap->ts, true), debug_points);
-        if (!bridge.ok)
-            return;
-        if (snap->connected && it != e.history.end() && e.applied) {
+        if (!bridge.ok) { out.abs_reason = "bridge_failed"; return; }
+        if (snap->epoch != epoch && snap->bound) {
+            if (!snap->expected) { out.abs_reason = "unbound_conflict"; return; }
+            const auto discrepancy = abs * snap->expected->inv();
+            out.jump_3120 = maxTravel(discrepancy,e.size) * 3120. / e.size.width;
+            if (out.jump_3120 > kLarge || std::abs(scaleOf(discrepancy)-1) > kScaleJump) {
+                out.abs_reason = "snapshot_conflict";
+                return;
+            }
+        }
+        out.abs_reason = "measured_bridge";
+        if (snap->epoch == epoch && snap->connected && it != e.history.end() && e.applied) {
             // Retained history allows the normal conflict gate even after a dropout.
             const Sample s = *it;
             if (!adopt(correction(s.chain, abs), a, s, out))
@@ -614,10 +744,18 @@ struct BigMapMotionSession::State {
             e.history.clear();
             e.good_ts = s.ts;
             e.previous_dt = 0;
+        } else if (e.applied) {
+            // A disconnected refresh must not bypass the existing conflict gate. With a
+            // measured current chain, compare at NOW but keep the snapshot time/budget origin.
+            if (e.good_ts != ts) { out.abs_reason = "frame_mismatch"; return; }
+            const Pose candidate = correction(e.chain, toFrame(bridge.work) * abs);
+            // No chain sample at the snapshot: conservatively keep all prior budget charges.
+            adopt(candidate,a,Sample{snap->ts, {}, e.abs_path,e.abs_zoom},out);
+            return;
         } else {
             // The old and new chains have no measured relation. No old D may cross this boundary.
             auto size = e.size;
-            invalidate(false);
+            invalidate(false,true);
             e.size = size;
             e.masks.prepare(gray.size());
             e.record(snap->ts, snap->gray);
@@ -652,11 +790,8 @@ struct BigMapMotionSession::State {
             out.step.reason = "invalid_frame";
             return r;
         }
-        const int64_t retained_since = e.lost_ts >= 0 ? e.lost_ts : e.good_ts;
         if (!e.size.empty() && frame.size() != e.size)
             invalidate();
-        else if (retained_since >= 0 && ts - retained_since > kRetain)
-            invalidate(false);
         e.size = frame.size();
         auto gray = gray360(frame);
         e.masks.prepare(gray.size());
@@ -667,13 +802,16 @@ struct BigMapMotionSession::State {
             e.record(ts, gray);
         else {
             const int64_t gap = ts - e.good_ts;
-            out.step = track(e.good, gray, e.masks, prediction(gap, e.failures > 0), debug_points);
-            if (out.step.ok && gap <= kBridge && e.failures < kFailures && e.lost_ts < 0) {
+            if (gap <= kBridge) out.step = track(e.good, gray, e.masks, prediction(gap, e.failures > 0), debug_points);
+            else out.step.reason = "bridge_expired";
+            if (out.step.ok) {
                 out.bridge = e.failures > 0;
                 e.failures = 0;
                 if (!out.bridge)
                     previous_gray = e.good;
                 advance(gray, ts, out.step);
+                e.fallback_streak = out.step.fallback_ok ? e.fallback_streak + 1 : 0;
+                if (e.fallback_streak == 3) e.urgent = true;
                 if (!validSimilarity(e.chain)) {
                     invalidate(false);
                     out.step.ok = false;
@@ -681,13 +819,16 @@ struct BigMapMotionSession::State {
                     return r;
                 }
             } else {
-                if (out.step.ok) {
-                    out.step.ok = false;
-                    out.step.reason = "bridge_expired";
-                }
+                if (first_failure < 0) first_failure = ts;
+                e.fallback_streak = 0;
                 ++e.failures;
-                if (e.lost_ts < 0 && (gap > kBridge || e.failures >= kFailures)) {
-                    e.lost_ts = ts;
+                if (gap > kBridge || e.failures >= kFailures) {
+                    out.lost = true;
+                    out.lost_reason = gap > kBridge ? "bridge_expired" : "failures";
+                    invalidate(false,true); // only an internal tracking rebase retains the outstanding snapshot
+                    e.size = frame.size();
+                    e.masks.prepare(gray.size());
+                    e.record(ts,gray);
                     e.urgent = true;
                 }
             }
@@ -730,8 +871,7 @@ struct BigMapMotionSession::State {
         out.zoom_since_abs = e.zoom - e.abs_zoom;
         out.abs_age_s = e.abs_ts < 0 ? -1 : (ts - e.abs_ts) * 1e-9;
         out.abs_conflicts = e.conflicts;
-        out.lost = e.lost_ts >= 0;
-        if (!out.step.ok || !e.applied || out.lost || e.overBudget() || out.overlay_hidden)
+        if (!out.step.ok || !e.applied || e.overBudget() || out.overlay_hidden)
             return r;
         const Pose current = e.chain * *e.applied;
         if (!validSimilarity(current))
@@ -747,6 +887,10 @@ struct BigMapMotionSession::State {
         r.follow.debug_points = out.step.debug_points;
         r.measured_motion = true;
         out.velocity = e.velocity;
+        if (first_failure >= 0) {
+            out.recovery_ms = (ts - first_failure) * 1e-6;
+            first_failure = -1;
+        }
         return r;
     }
 };

@@ -16,9 +16,11 @@ class TrackingLogFilterTest {
     @Test fun preservesMotionAggregatesAndOpenCvVersionWithoutPrivateFields() {
         val step = "BigMapMotion stage=step tsNs=815123456789 gen=2 ok=1 reason=static_pixels corners=250 tracked=240 inliers=230 " +
             "scaleStep=1.0003 txStep=0.02 tyStep=-0.01 lkMs=12 ransacMs=1 totalMs=18 convertMs=3 " +
-            "pathSinceAbs=12 zoomSinceAbs=0.1 absAgeS=2 bridge=0 chainEpoch=7 hidden=0"
+            "pathSinceAbs=12 zoomSinceAbs=0.1 absAgeS=2 bridge=0 chainEpoch=7 hidden=0 " +
+            "fallback_tried=1 fallback_ok=1 fallback_ms=104.3 fallback_matches=65 fallback_inliers=42 fallback_scale=2.1 recovery_ms=133"
         val clean = TrackingLogFilter.sanitize(native(step), pid)!!
         assertTrue(clean.endsWith(step))
+        assertTrue(TrackingLogFilter.sanitize(native("BigMapMotion stage=abs_result outcome=discarded absReason=bridge_failed"), pid)!!.endsWith("absReason=bridge_failed"))
         for (stage in listOf("abs_request", "abs_result", "abs_apply", "abs_conflict", "lost"))
             assertTrue(TrackingLogFilter.sanitize(native("BigMapMotion stage=$stage outcome=suspect jumpPx=150 conflicts=1"), pid)!!.contains("stage=$stage"))
         val control = "BigMapMotion stage=control roi=0 outcome=unverifiable screenFixed=0 coverage=1 " +

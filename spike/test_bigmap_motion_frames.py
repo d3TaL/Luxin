@@ -9,7 +9,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cv2
-from compare_bigmap_motion_frames import compare, matrix
+from compare_bigmap_motion_frames import compare, matrix, fails_sift_budget
 from test_bigmap_motion_eval import make_textured_canvas, synthesize_sequence
 from bigmap_motion_eval import make_3dof
 from bigmap_motion_eval import pose_corner_error_3120
@@ -101,6 +101,7 @@ class ReplayTest(unittest.TestCase):
             compare(BINARY, self.dump)
 
     def test_corner_metric_detects_zoom_at_fixed_centre(self):
+        self.assertTrue(fails_sift_budget(0., [(4,120.),(8,0.)],4))
         # Wrong zoom with zero centre error must still exceed the 3px budget.
         ref = matrix(1., 0., 0., 1440, 780, 360)
         est = matrix(1.003, 0., 0., 1440, 780, 360)

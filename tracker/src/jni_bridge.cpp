@@ -182,20 +182,22 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeBigMapMotionUpdate(
         const auto& s=stats.step;
         LOGI("BigMapMotion stage=step ts=%.9f tsNs=%lld gen=%lld ok=%d reason=%s corners=%d tracked=%d inliers=%d "
              "scaleStep=%.9f txStep=%.6f tyStep=%.6f lkMs=%.3f ransacMs=%.3f totalMs=%.3f convertMs=%.3f "
-             "pathSinceAbs=%.6f zoomSinceAbs=%.6f absAgeS=%.3f bridge=%d chainEpoch=%llu hidden=%d",
+             "pathSinceAbs=%.6f zoomSinceAbs=%.6f absAgeS=%.3f bridge=%d chainEpoch=%llu hidden=%d "
+             "fallback_tried=%d fallback_ms=%.3f fallback_ok=%d fallback_inliers=%d fallback_matches=%d fallback_scale=%.6f recovery_ms=%.3f",
              timestamp_ns*1e-9,(long long)timestamp_ns,(long long)generation,s.ok,s.reason,s.corners,s.matches,s.inliers,
              s.work(0,0),s.work(0,2),s.work(1,2),s.lk_ms,s.ransac_ms,diagnosticMs(begin),convert_ms,
-             stats.path_since_abs,stats.zoom_since_abs,stats.abs_age_s,stats.bridge,(unsigned long long)stats.epoch,stats.overlay_hidden);
+             stats.path_since_abs,stats.zoom_since_abs,stats.abs_age_s,stats.bridge,(unsigned long long)stats.epoch,stats.overlay_hidden,
+             s.fallback_tried,s.fallback_ms,s.fallback_ok,s.fallback_inliers,s.fallback_matches,s.fallback_scale,stats.recovery_ms);
         if (stats.requested) LOGI("BigMapMotion stage=abs_request tsNs=%lld chainEpoch=%llu",(long long)timestamp_ns,(unsigned long long)stats.epoch);
         if (std::string(stats.absolute)!="none") {
-            LOGI("BigMapMotion stage=abs_result tsNs=%lld outcome=%s jumpPx=%.6f conflicts=%u chainEpoch=%llu",
-                 (long long)timestamp_ns,stats.absolute,stats.jump_3120,stats.abs_conflicts,(unsigned long long)stats.epoch);
+            LOGI("BigMapMotion stage=abs_result tsNs=%lld outcome=%s absReason=%s jumpPx=%.6f conflicts=%u chainEpoch=%llu",
+                 (long long)timestamp_ns,stats.absolute,stats.abs_reason,stats.jump_3120,stats.abs_conflicts,(unsigned long long)stats.epoch);
             const std::string outcome(stats.absolute);
             if (outcome=="initial" || outcome=="blend_small" || outcome=="blend_three")
-                LOGI("BigMapMotion stage=abs_apply tsNs=%lld outcome=%s",(long long)timestamp_ns,stats.absolute);
+                LOGI("BigMapMotion stage=abs_apply tsNs=%lld outcome=%s recovery_ms=%.3f",(long long)timestamp_ns,stats.absolute,stats.recovery_ms);
             if (outcome=="suspect") LOGI("BigMapMotion stage=abs_conflict tsNs=%lld conflicts=%u",(long long)timestamp_ns,stats.abs_conflicts);
         }
-        if (stats.lost) LOGI("BigMapMotion stage=lost tsNs=%lld",(long long)timestamp_ns);
+        if (stats.lost) LOGI("BigMapMotion stage=lost tsNs=%lld reason=%s",(long long)timestamp_ns,stats.lost_reason);
         if (stats.overlay_hidden) LOGI("BigMapMotion stage=screen_change tsNs=%lld hidden=1",(long long)timestamp_ns);
         for(size_t i=0;i<stats.controls.size();++i) {
             const auto& c=stats.controls[i];

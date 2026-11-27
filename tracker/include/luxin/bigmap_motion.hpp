@@ -14,6 +14,9 @@ struct BigMapMotionStep {
     bool ok = false;
     int corners = 0, matches = 0, inliers = 0;
     double error_px = 0, lk_ms = 0, ransac_ms = 0;
+    double fallback_ms = 0, fallback_scale = 0;
+    int fallback_matches = 0, fallback_inliers = 0;
+    bool fallback_tried = false, fallback_ok = false;
     cv::Matx33d work = cv::Matx33d::eye(); // last good -> current, working pixels
     std::vector<cv::Point2f> debug_points; // optional inlier destinations, at most 48 working-pixel pairs
 };
@@ -37,6 +40,8 @@ struct BigMapMotionStats {
     bool bridge = false, lost = false, overlay_hidden = false, requested = false;
     std::array<MotionControlObservation, 2> controls{};
     const char *absolute = "none";
+    const char *abs_reason = "none", *lost_reason = "none";
+    double recovery_ms = -1;
     double jump_3120 = 0, path_since_abs = 0, zoom_since_abs = 0, abs_age_s = -1;
     unsigned abs_conflicts = 0;
 };

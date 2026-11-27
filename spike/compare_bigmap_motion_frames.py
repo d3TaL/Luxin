@@ -65,16 +65,84 @@ def compare(binary, dump, stride=1, details=None, ok_rate_only=False):
     return len(rows), worst, worst_index
 
 
+def compare_sift(binary, dump, stride, details=False):
+    """Evaluate whole native chain against a common full-rate SIFT trajectory. After a
+    fallback, seed the Python LK oracle with that step (not ground truth) and keep
+    checking cumulative error on every following non-fallback frame."""
+    if stride < 1:
+        raise ValueError('stride must be positive')
+    all_frames = reference.load_frames_from_dump(dump, work_height=360)
+    frames = all_frames[::stride]
+    h, w = frames[0].gray.shape
+    mask = reference.bigmap_geometry_mask(w,h)
+    gt = reference.compute_gt_from_sift(all_frames,mask)
+    run = subprocess.run([binary.resolve(),dump,'--stride',str(stride)],check=True,text=True,stdout=subprocess.PIPE)
+    rows = list(csv.DictReader(run.stdout.splitlines()))
+    if len(frames) < 2 or len(rows) != len(frames) or any(int(r['index']) != f.index for r,f in zip(rows,frames)):
+        raise ValueError('incomplete/misaligned replay')
+    def work(row,prefix):
+        s,dx,dy = (float(row[f'{prefix}_{k}']) for k in ('scale','tx_3120','ty_3120'))
+        return reference.make_3dof(s, dx*w/3120+(1-s)*w/2, dy*w/3120+(1-s)*h/2)
+    prev = None
+    chain = reference.make_3dof(1,0,0)
+    worst_lk = 0.
+    errors = []
+    count = missed = 0
+    last_good = 0
+    for i,(frame,row) in enumerate(zip(frames[1:],rows[1:]),1):
+        if row['epoch'] != rows[0]['epoch'] or row['lost'] != '0':
+            raise ValueError(f"lost chain at {frame.index}")
+        if row['ok'] != '1':
+            if row['cum_scale'] or not int(row['fallback_tried']): raise ValueError(f'unexpected dropout {frame.index}')
+            missed += 1
+            continue
+        if bool(int(row['bridge'])) != (last_good != i-1): raise ValueError('incorrect bridge provenance')
+        native = work(row,'cum')
+        if i*stride in gt:
+            err = reference.pose_corner_error_3120(native,gt[i*stride],w,h)
+            if not math.isfinite(err): raise ValueError('invalid GT comparison')
+            errors.append((frame.index,err))
+        dt = frame.timestamp_s - frames[last_good].timestamp_s
+        if int(row['fallback_ok']):
+            if i*stride not in gt: raise ValueError(f'no independent SIFT coverage at fallback {frame.index}')
+            count += 1
+            step = work(row,'step')
+        else:
+            if last_good != i-1: raise ValueError(f'no Python velocity oracle for LK bridge at {frame.index}')
+            prediction = reference._predict_3dof_step(prev,dt/prev_dt,w,h) if prev is not None else None
+            lk = reference.estimate_lk_3dof_step(frames[i-1].gray,frame.gray,mask,init_transform=prediction)
+            if not lk.ok: raise ValueError(f'Python LK rejected non-fallback step {frame.index}')
+            step = lk.matrix
+        chain = reference.compose_affine(step,chain)
+        if not int(row['fallback_ok']):
+            err = reference.pose_corner_error_3120(chain,native,w,h)
+            if not math.isfinite(err): raise ValueError('invalid LK comparison')
+            worst_lk = max(worst_lk,err)
+        prev,prev_dt,last_good = step,dt,i
+    if not errors or errors[-1][0] != frames[-1].index: raise ValueError('missing SIFT endpoint')
+    if details: print('GT_index:error_3120='+','.join(f'{i}:{v:.3f}' for i,v in errors))
+    print(f'stride={stride} steps={len(rows)-1} fallback_ok={count} rejected={missed} lost=0 gt_samples={len(errors)} '
+          f'gt_max={max(v for _,v in errors):.3f} gt_end={errors[-1][1]:.3f} lk_max={worst_lk:.5f}')
+    return fails_sift_budget(worst_lk, errors, stride)
+
+
+def fails_sift_budget(worst_lk, errors, stride):
+    return worst_lk > 3 or max(v for _,v in errors) > (30 if stride <= 4 else 40)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('binary', type=Path)
     parser.add_argument('dump', type=Path)
     parser.add_argument('--stride', type=int, default=1)
     parser.add_argument('--ok-rate-only', action='store_true')
+    parser.add_argument('--gt-sift', action='store_true', help='full-rate SIFT pseudo-GT plus LK-only agreement')
     parser.add_argument('--details', action='store_true', help='top ten errors and indices 107/126')
     args = parser.parse_args()
     reference.cv2.setNumThreads(1)
     try:
+        if args.gt_sift:
+            return int(compare_sift(args.binary,args.dump,args.stride,args.details))
         details=[]
         steps, error, idx = compare(args.binary, args.dump,args.stride,details,args.ok_rate_only)
     except (OSError, subprocess.CalledProcessError, ValueError, KeyError) as exc:

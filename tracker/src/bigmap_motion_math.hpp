@@ -12,6 +12,8 @@ Pose predict(const Pose &previous, double dt_ratio, cv::Size size);
 // motion while the search ran. Current pose = Chain(now) * D.
 Pose correction(const Pose &snapshot_chain, const Pose &absolute);
 BigMapMotionStep fit(const Points &src, const Points &dst, std::vector<uchar> &inliers);
+bool competingFallback(const Points &src, const Points &dst, const std::vector<uchar> &inliers,
+                       const BigMapMotionStep &winner, cv::Size size);
 void requireFixedAdvantage(MotionControlObservation& observation, bool moving);
 bool controlMoving(const Pose &step, cv::Size work_size);
 struct ControlLatch {

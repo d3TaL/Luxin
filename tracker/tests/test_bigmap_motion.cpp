@@ -276,6 +276,22 @@ void algebra() {
               << "/25, map inliers=" << fit1.inliers << "/75\n";
     check(rejected == 25 && fit1.inliers == 75, "icon RANSAC labels");
     check(mask == again && fit1.work == fit2.work, "repeatable RANSAC");
+    p.clear(); q.clear();
+    for (int i=0;i<80;++i) {
+        cv::Point2d pt(80+(i%10)*55,50+(i/10)*26);
+        p.push_back(pt); q.push_back(pt + cv::Point2d(i%2 ? -36 : 50, 8));
+    }
+    auto tied = fit(p,q,mask);
+    check(tied.inliers==40 && competingFallback(p,q,mask,tied,size), "ambiguous distributed translations rejected");
+    p.clear(); q.clear(); mask.clear();
+    const auto rival = centered(1.04);
+    for (int i=0;i<80;++i) {
+        const auto pt = i<40 ? cv::Point2d(385+i%10,178+i/10) : cv::Point2d(60+(i%2)*630,50+(i%20)*12);
+        auto dest=rival*cv::Vec3d(pt.x,pt.y,1);
+        p.push_back(pt); q.push_back(i<60 ? pt : cv::Point2d(dest[0],dest[1])); mask.push_back(i<60);
+    }
+    BigMapMotionStep dominant; dominant.inliers=60;
+    check(competingFallback(p,q,mask,dominant,size), "two zooms share 40 central inliers and diverge at edges");
 }
 void loss(const Map &map) {
     auto a = map.frame();
@@ -294,15 +310,42 @@ void loss(const Map &map) {
     Stub s;
     s.lock(a);
     auto far = map.frame(centered(1, 360, 25));
-    for (int i = 0; i < 8; ++i)
-        check(s.feed(far).geometry.matrix.empty(), ">40% width jump");
-    check(s.stats.lost && s.stats.requested, "eight strikes initiate search");
-    s.reply(centered(1, 360, 25));
-    auto restored = s.feed(map.frame(centered(1, 363, 25)));
-    check(restored.phase == "tracking" && s.stats.bridge &&
-              std::abs(restored.geometry.matrix.at<double>(0, 2) - 363) < .3,
-          "disconnected snapshot bridge");
+    check(s.feed(far).phase == "tracking" && s.stats.step.fallback_ok &&
+          error(s.stats.step.work,centered(1,360,25)) < 1, "wide pan SIFT fallback");
     check(s.feed(far, 601 * ms).geometry.matrix.empty() && s.stats.lost, "600ms limit even when LK matches");
+    check(s.stats.requested, "fresh connected snapshot on loss frame");
+    s.reply(centered(1,360,25));
+    check(s.feed(far).phase == "tracking" && s.stats.recovery_ms == 33, "immediate connected reacquisition");
+
+    for (bool return_to_map : {false,true}) {
+        Stub t;
+        t.feed(a); // an absolute search still in flight
+        auto epoch = t.stats.epoch;
+        cv::Mat unrelated(size,CV_8U);
+        cv::RNG(17).fill(unrelated,cv::RNG::UNIFORM,0,255);
+        check(t.feed(unrelated).geometry.matrix.empty() && t.stats.step.fallback_tried && !t.stats.step.fallback_ok,
+              "unrelated texture cannot establish SIFT bridge");
+        check(t.feed(unrelated,601*ms).geometry.matrix.empty() && t.stats.lost && epoch != t.stats.epoch && t.requests==1,
+              "immediate rebase despite outstanding worker");
+        Pose A = centered(1.3,18,-23), B = centered(2.2,7,-2);
+        t.reply(A);
+        auto r = t.feed(return_to_map ? map.frame(B) : unrelated);
+        if (return_to_map) {
+            check(r.phase == "tracking" && t.stats.bridge && t.stats.step.fallback_ok &&
+                  error(t.stats.step.work,B) < 2 && cv::norm(r.geometry.matrix,cv::Mat(t.stats.step.work*A).rowRange(0,2)) < 1e-8 &&
+                  std::abs(t.stats.abs_age_s - .667) < 1e-9 && t.stats.recovery_ms == 634,
+                  "old tracking epoch measured zoom bridge B*A and snapshot age");
+        } else check(r.geometry.matrix.empty() && std::string(t.stats.abs_reason)=="bridge_failed" && t.requests==2,
+                     "old epoch rejected without bridge; next connected request");
+    }
+    Stub locked;
+    locked.lock(a);
+    for (int i=0;i<10 && !locked.stats.requested;++i) locked.feed(a,250*ms);
+    check(locked.stats.requested, "connected refresh of a known space");
+    check(locked.feed(blank,601*ms).geometry.matrix.empty() && locked.stats.lost, "lose bound chain");
+    locked.reply(centered(1,200,0));
+    check(locked.feed(a).geometry.matrix.empty() && std::string(locked.stats.abs_reason)=="snapshot_conflict" &&
+          locked.stats.requested, "a measured bridge cannot validate a conflicting absolute location");
 }
 void screen(const Map &map) {
     // Closing the map to a blank screen loses LK, independent of any panel decision.
@@ -717,6 +760,11 @@ int main(int argc, char **argv) try {
         return 0;
     }
     Map map;
+    if (argc == 2 && std::string(argv[1]) == "--loss-only") {
+        loss(map);
+        std::cout << "PASS: " << checks << " recovery checks\n";
+        return 0;
+    }
     if (argc == 2 && std::string(argv[1]) == "--worker-only") {
         workerRace(map);
         std::cout << "PASS: " << checks << " worker checks\n";

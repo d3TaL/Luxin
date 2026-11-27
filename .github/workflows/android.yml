@@ -46,6 +46,9 @@ jobs:
       - run: tracker/build-tsan/test_bigmap_motion --worker-only
         env:
           TSAN_OPTIONS: halt_on_error=1
+      - run: tracker/build-tsan/test_bigmap_motion --loss-only
+        env:
+          TSAN_OPTIONS: halt_on_error=1
 
   build:
     name: Build Debug APK (with Android NDK & OpenCV 4.10)
