@@ -178,12 +178,12 @@ void ControlLatch::observe(MotionControlObservation &c, bool moving) {
 }
 
 namespace {
-cv::Mat gray360(const cv::Mat &frame) {
+cv::Mat gray360(const cv::Mat &frame, bool rgba) {
     cv::Mat gray, small;
     if (frame.channels() == 1)
         gray = frame;
     else
-        cv::cvtColor(frame, gray, frame.channels() == 3 ? cv::COLOR_BGR2GRAY : cv::COLOR_BGRA2GRAY);
+        cv::cvtColor(frame, gray, frame.channels() == 3 ? cv::COLOR_BGR2GRAY : (rgba ? cv::COLOR_RGBA2GRAY : cv::COLOR_BGRA2GRAY));
     if (gray.rows <= 360)
         return gray.clone();
     cv::resize(gray, small, {cvRound(gray.cols * (360. / gray.rows)), 360}, 0, 0, cv::INTER_AREA);
@@ -609,7 +609,7 @@ struct BigMapMotionSession::State {
         return validSimilarity(forecast) ? std::optional<Pose>(toWork(forecast)) : std::nullopt;
     }
     void request(const cv::Mat &frame, const cv::Mat &gray, const Refs &refs, int64_t ts, bool connected,
-                 BigMapMotionStats &out) {
+                 BigMapMotionStats &out, bool rgba) {
         if (worker.valid() || !launch || refs.empty())
             return;
         const bool slow = out.step.ok && maxTravel(out.step.work, gray.size()) <= kSlow;
@@ -623,7 +623,7 @@ struct BigMapMotionSession::State {
         }
         cv::Mat owned;
         if (frame.channels() == 4)
-            cv::cvtColor(frame, owned, cv::COLOR_BGRA2BGR);
+            cv::cvtColor(frame, owned, rgba ? cv::COLOR_RGBA2BGR : cv::COLOR_BGRA2BGR);
         else
             owned = frame.clone();
         e.request_ts = ts;
@@ -767,7 +767,7 @@ struct BigMapMotionSession::State {
         out.bridge = true;
     }
     BigMapSessionResult update(const cv::Mat &frame, const Refs &refs, int64_t ts, uint64_t gen,
-                               BigMapMotionStats &out) {
+                               BigMapMotionStats &out, bool rgba) {
         BigMapSessionResult r;
         if (gen < generation) {
             out.step.reason = "old_generation";
@@ -793,7 +793,7 @@ struct BigMapMotionSession::State {
         if (!e.size.empty() && frame.size() != e.size)
             invalidate();
         e.size = frame.size();
-        auto gray = gray360(frame);
+        auto gray = gray360(frame,rgba);
         e.masks.prepare(gray.size());
         // An LK bridge is measured against last_good (or a snapshot), not the preceding
         // capture. Never apply that transform to the intervening frame for ROI evidence.
@@ -865,7 +865,7 @@ struct BigMapMotionSession::State {
         if (e.overBudget() && !e.budget_was_exceeded)
             e.urgent = true;
         e.budget_was_exceeded = e.overBudget();
-        request(frame, gray, refs, ts, e.good_ts == ts, out);
+        request(frame, gray, refs, ts, e.good_ts == ts, out, rgba);
         out.chain = e.chain;
         out.path_since_abs = e.path - e.abs_path;
         out.zoom_since_abs = e.zoom - e.abs_zoom;
@@ -911,10 +911,10 @@ void BigMapMotionSession::reset() {
 }
 BigMapSessionResult BigMapMotionSession::update(const cv::Mat &frame, const Refs &refs, int64_t timestamp_ns,
                                                 uint64_t generation, BigMapMotionStats *stats,
-                                                bool debug_points) {
+                                                bool debug_points, bool rgba) {
     BigMapMotionStats out;
     state_->debug_points = debug_points;
-    auto r = state_->update(frame, refs, timestamp_ns, generation, out);
+    auto r = state_->update(frame, refs, timestamp_ns, generation, out, rgba);
     out.epoch = state_->epoch;
     if (stats)
         *stats = out;

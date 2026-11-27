@@ -122,15 +122,19 @@ data class DecodedBigMapGeometry(
     val mode: String,
     val geometry: BigMapGeometry?,
     val phase: String = "absolute",
-    val version: Int = 1
+    val version: Int = 1,
+    val timings: MotionTimings? = null
 )
+
+@Serializable data class MotionTimings(val lkMs: Double, val ransacMs: Double, val fallbackMs: Double)
 
 @Serializable
 private data class NativeBigMapHeader(
     val mode: String = "rejected",
     val phase: String? = null,
     val version: Int = 1, // Legacy JNI did not require an explicit version.
-    val measuredMotion: Boolean = false
+    val measuredMotion: Boolean = false,
+    val timings: MotionTimings? = null
 )
 
 @Serializable
@@ -172,11 +176,11 @@ object BigMapGeometryDecoder {
             // explicit evidence from a complete, current-frame follow opts into moving geometry.
             val confirmed = phase == "tracking" || (version == 2 && phase == "moving" && header.measuredMotion) ||
                 (version == 1 && phase == "absolute")
-            if (header.mode != "found" || !confirmed) return DecodedBigMapGeometry(header.mode, null, phase, version)
+            if (header.mode != "found" || !confirmed) return DecodedBigMapGeometry(header.mode, null, phase, version,header.timings)
 
             val body = if (version == 1) root else root["v2"] as? JsonObject ?: return rejected(version)
             val geometry = json.decodeFromJsonElement<NativeBigMapGeometry>(body).validated(version)
-            DecodedBigMapGeometry("found", geometry, phase, version)
+            DecodedBigMapGeometry("found", geometry, phase, version,header.timings)
         } catch (_: IllegalArgumentException) {
             rejected(version)
         }

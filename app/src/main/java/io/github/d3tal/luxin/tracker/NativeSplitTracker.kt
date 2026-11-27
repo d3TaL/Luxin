@@ -3,6 +3,7 @@ package io.github.d3tal.luxin.tracker
 import android.graphics.Bitmap
 import io.github.d3tal.luxin.overlay.MinimapCalibrationStore
 import java.io.Closeable
+import java.nio.ByteBuffer
 
 /** A zero unitScale selects 0.75 * bitmap height / 1440; positive values override it. */
 class NativeSplitTracker(unitScale: Double = 0.0) : Closeable {
@@ -104,6 +105,16 @@ class NativeSplitTracker(unitScale: Double = 0.0) : Closeable {
 
     private external fun nativeBigMapMotionUpdate(handle: Long, frameBitmap: Bitmap, timestampNs: Long,
                                                   generation: Long, debugPoints: Boolean): String
+
+    @Synchronized
+    fun motionRgba(bytes: ByteBuffer, w: Int, h: Int, stride: Int, ts: Long, gen: Long, debug: Boolean): String =
+        nativeMotionRgba(handle, bytes.slice(), w, h, stride, ts, gen, debug)
+
+    private external fun nativeMotionRgba(handle: Long, bytes: ByteBuffer, w: Int, h: Int, stride: Int,
+                                         ts: Long, gen: Long, debug: Boolean): String
+    @Synchronized fun motionGate(bytes: ByteBuffer,w: Int,h: Int,stride: Int,force: Boolean) =
+        nativeMotionGate(handle,bytes.slice(),w,h,stride,force)
+    private external fun nativeMotionGate(handle: Long,bytes: ByteBuffer,w: Int,h: Int,stride: Int,force: Boolean): Boolean
 
     /**
      * Атомарный снимок текущего состояния сессии без запуска нового вычисления SIFT.

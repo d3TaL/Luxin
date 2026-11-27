@@ -3,6 +3,8 @@
 #include "luxin/bigmap_geometry.hpp"
 #include "luxin/bigmap_session.hpp"
 #include "luxin/bigmap_motion.hpp"
+#include "motion_rgba.hpp"
+#include "motion_ui_guard.hpp"
 
 #include <android/bitmap.h>
 #include <android/log.h>
@@ -34,6 +36,7 @@ struct NativeTrackerContext {
     std::unique_ptr<luxin::SplitTracker> tracker;
     luxin::BigMapSession bigmap{luxin::registerBigMap};
     luxin::BigMapMotionSession motion;
+    luxin::motion::MotionUiGuard motion_ui;
     double unit_scale_override = 0.0;
     double unit_scale = 0.75;
     int frame_width = 0;
@@ -161,23 +164,25 @@ void logBeforeBigMapAbsolute(const luxin::BigMapSessionResult& result, void* con
 
 extern "C" {
 
-JNIEXPORT jstring JNICALL
-Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeBigMapMotionUpdate(
-    JNIEnv* env, jobject, jlong handle, jobject bitmap, jlong timestamp_ns, jlong generation, jboolean debug_points
+static jstring motionUpdate(
+    JNIEnv* env, jlong handle, jobject bitmap, jobject buffer, jint width, jint height, jint stride,
+    jlong timestamp_ns, jlong generation, jboolean debug_points
 ) {
     auto* ctx=reinterpret_cast<NativeTrackerContext*>(handle);
     if (!ctx) return env->NewStringUTF("{\"error\":\"closed tracker\"}");
     std::lock_guard<std::mutex> lock(ctx->mutex);
     try {
         const auto begin=DiagnosticClock::now();
-        cv::Mat bgr;
-        if (!bitmap || timestamp_ns<0 || generation<0 || !bitmapToBgrMat(env,bitmap,bgr)) {
+        cv::Mat frame;
+        if (buffer) frame=luxin::motion::borrowedRgba(env->GetDirectBufferAddress(buffer),env->GetDirectBufferCapacity(buffer),width,height,stride);
+        else if (bitmap) bitmapToBgrMat(env,bitmap,frame);
+        if (frame.empty() || timestamp_ns<0 || generation<0) {
             ctx->motion.reset();
             return env->NewStringUTF("{\"error\":\"invalid motion input\"}");
         }
         const double convert_ms=diagnosticMs(begin);
         luxin::BigMapMotionStats stats;
-        const auto result=ctx->motion.update(bgr,ctx->models,timestamp_ns,generation,&stats,debug_points);
+        const auto result=ctx->motion.update(frame,ctx->models,timestamp_ns,generation,&stats,debug_points,buffer!=nullptr);
         const auto& g=result.geometry;
         const auto& s=stats.step;
         LOGI("BigMapMotion stage=step ts=%.9f tsNs=%lld gen=%lld ok=%d reason=%s corners=%d tracked=%d inliers=%d "
@@ -206,7 +211,8 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeBigMapMotionUpdate(
                   (long long)timestamp_ns,(int)i,verdict,c.screen_fixed,c.coverage,c.warped_residual,c.fixed_residual,c.warped_changed_fraction,c.fixed_changed_fraction,c.static_latch_frames,c.static_release_frames,c.latch_reason);
         }
         std::ostringstream out; out.imbue(std::locale::classic());
-        out<<std::setprecision(17)<<"{\"version\":2,\"mode\":"<<jsonString(g.mode)<<",\"phase\":"<<jsonString(result.phase);
+        out<<std::setprecision(17)<<"{\"version\":2,\"mode\":"<<jsonString(g.mode)<<",\"phase\":"<<jsonString(result.phase)
+           <<",\"timings\":{\"lkMs\":"<<s.lk_ms<<",\"ransacMs\":"<<s.ransac_ms<<",\"fallbackMs\":"<<s.fallback_ms<<'}';
         if(g.mode=="found") {
             out<<",\"v2\":{\"space\":"<<jsonString(g.space)<<",\"reference\":"<<jsonString(g.reference)
                <<",\"frameWidth\":"<<g.frame_width<<",\"frameHeight\":"<<g.frame_height
@@ -231,6 +237,29 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeBigMapMotionUpdate(
         LOGI("BigMapMotion stage=error reason=registration_exception");
         return env->NewStringUTF("{\"error\":\"motion update failed\"}");
     }
+}
+
+JNIEXPORT jstring JNICALL
+Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeBigMapMotionUpdate(
+    JNIEnv* env, jobject, jlong handle, jobject bitmap, jlong timestamp, jlong gen, jboolean debug) {
+    return motionUpdate(env,handle,bitmap,nullptr,0,0,0,timestamp,gen,debug);
+}
+
+JNIEXPORT jstring JNICALL
+Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeMotionRgba(
+    JNIEnv* env, jobject, jlong handle, jobject buffer, jint w, jint h, jint stride, jlong ts, jlong gen, jboolean debug) {
+    return motionUpdate(env,handle,nullptr,buffer,w,h,stride,ts,gen,debug);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeMotionGate(
+    JNIEnv* env,jobject,jlong handle,jobject buffer,jint w,jint h,jint stride,jboolean force) {
+    auto *ctx=reinterpret_cast<NativeTrackerContext*>(handle);
+    if (!ctx || !buffer) return false;
+    std::lock_guard<std::mutex> lock(ctx->mutex);
+    try { return ctx->motion_ui.check(luxin::motion::borrowedRgba(env->GetDirectBufferAddress(buffer),
+        env->GetDirectBufferCapacity(buffer),w,h,stride),force); }
+    catch (const std::exception &) { ctx->motion_ui={}; return false; }
 }
 
 JNIEXPORT jstring JNICALL

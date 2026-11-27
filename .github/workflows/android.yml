@@ -26,8 +26,8 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libopencv-dev python3-opencv
       - run: pkg-config --modversion opencv4
       - run: cmake -S tracker -B tracker/build-debug -DCMAKE_BUILD_TYPE=Debug
-      - run: cmake --build tracker/build-debug --target test_bigmap_session test_bigmap_geometry test_bigmap_motion bigmap_motion_frames -j2
-      - run: ctest --test-dir tracker/build-debug --output-on-failure -R '^(test_bigmap_session|test_bigmap_geometry|test_bigmap_motion)$'
+      - run: cmake --build tracker/build-debug --target test_bigmap_session test_bigmap_geometry test_bigmap_detector test_bigmap_motion bigmap_motion_frames -j2
+      - run: ctest --test-dir tracker/build-debug --output-on-failure -R '^(test_bigmap_session|test_bigmap_geometry|test_bigmap_detector|test_bigmap_motion)$'
       - run: /usr/bin/python3 -I spike/test_bigmap_motion_frames.py tracker/build-debug/bigmap_motion_frames
 
   bigmap-motion-tsan:
@@ -71,7 +71,7 @@ jobs:
         run: chmod +x gradlew
 
       - name: Test and Build Debug APK
-        run: ./gradlew testDebugUnitTest assembleDebug --stacktrace
+        run: ./gradlew testDebugUnitTest assembleDebug assembleDebugAndroidTest --stacktrace
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4

@@ -1,4 +1,5 @@
 #include "../src/bigmap_motion_math.hpp"
+#include "../src/motion_rgba.hpp"
 
 #include <cmath>
 #include <filesystem>
@@ -718,6 +719,19 @@ void motionDebugPoints(const Map &map) {
     check(stats.step.debug_points.empty(), "debug disabled exports no points");
 }
 void workerRace(const Map &map) {
+    std::vector<uchar> padded(2*36+7*4,0);
+    auto plane = borrowedRgba(padded.data(),padded.size(),7,3,36);
+    check(!plane.empty() && plane.ptr(2)==padded.data()+72, "padded direct RGBA, last row has no padding");
+    check(borrowedRgba(nullptr,100,7,3,32).empty() && borrowedRgba(padded.data(),99,7,3,36).empty() &&
+          borrowedRgba(padded.data(),100,7,3,24).empty() && borrowedRgba(padded.data(),100,0,3,32).empty(),"reject invalid direct geometry");
+    cv::Mat captured;
+    BigMapMotionSession direct([&](cv::Mat owned,BigMapMotionSession::Refs,double) {
+        captured=owned; std::promise<BigMapGeometry> task; task.set_value({}); return task.get_future();
+    });
+    plane.setTo(cv::Scalar(37,81,125,255));
+    direct.update(plane,{nullptr},ms,1,nullptr,false,true);
+    plane.setTo(cv::Scalar::all(0));
+    check(captured.at<cv::Vec3b>(2,6)==cv::Vec3b(125,81,37), "async search owns BGR, not the RGBA plane");
     std::promise<void> started, release, done;
     bool snapshot_intact = false;
     auto gate = release.get_future().share();

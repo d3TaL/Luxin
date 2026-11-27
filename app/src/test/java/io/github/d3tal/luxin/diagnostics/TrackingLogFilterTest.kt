@@ -20,6 +20,8 @@ class TrackingLogFilterTest {
             "fallback_tried=1 fallback_ok=1 fallback_ms=104.3 fallback_matches=65 fallback_inliers=42 fallback_scale=2.1 recovery_ms=133"
         val clean = TrackingLogFilter.sanitize(native(step), pid)!!
         assertTrue(clean.endsWith(step))
+        val cycle = "BigMap stage=cycle mode=MOTION readMs=2 bitmapMs=0 gateMs=0 nativeMs=26 lkMs=18 ransacMs=1 fallbackMs=0 publishMs=1 loopMs=35 idleMs=4"
+        assertTrue(TrackingLogFilter.sanitize(capture(cycle),pid)!!.endsWith(cycle))
         assertTrue(TrackingLogFilter.sanitize(native("BigMapMotion stage=abs_result outcome=discarded absReason=bridge_failed"), pid)!!.endsWith("absReason=bridge_failed"))
         for (stage in listOf("abs_request", "abs_result", "abs_apply", "abs_conflict", "lost"))
             assertTrue(TrackingLogFilter.sanitize(native("BigMapMotion stage=$stage outcome=suspect jumpPx=150 conflicts=1"), pid)!!.contains("stage=$stage"))

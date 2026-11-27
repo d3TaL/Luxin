@@ -1,5 +1,6 @@
 #include "luxin/bigmap_detector.hpp"
 #include "../src/bigmap_templates.hpp"
+#include "../src/motion_ui_guard.hpp"
 
 #include <chrono>
 #include <iostream>
@@ -26,6 +27,22 @@ cv::Mat fixture(bool plus = true, bool minus = true, bool track = true, int shif
 void testSynthetic() {
     using luxin::detectBigMap;
     require(detectBigMap(fixture()).detected, "complete slider not detected");
+    luxin::motion::MotionUiGuard guard;
+    cv::Mat rgba; cv::cvtColor(fixture(),rgba,cv::COLOR_GRAY2RGBA);
+    require(guard.check(rgba,true), "motion gate initially confirmed");
+    rgba(cv::Rect(600,30,600,350)).setTo(cv::Scalar(7,8,9,255));
+    require(guard.check(rgba,false), "changing map content outside cue accepted");
+    rgba(cv::Rect(88,268,24,24)).setTo(cv::Scalar(20,20,20,255));
+    require(!guard.check(rgba,false), "current cue disappeared despite unchanged map texture");
+    auto weak=fixture();
+    weak(cv::Rect(97,277,5,5)).setTo(35);
+    cv::cvtColor(weak,rgba,cv::COLOR_GRAY2RGBA);
+    require(guard.check(rgba,true),"slightly degraded cue is valid");
+    auto competitor=fixture(true,true,false,80);
+    competitor(cv::Rect(168,268,24,184)).copyTo(weak(cv::Rect(168,268,24,184)));
+    require(!detectBigMap(weak).detected,"stronger button pair without rail wins full search");
+    cv::cvtColor(weak,rgba,cv::COLOR_GRAY2RGBA);
+    require(!guard.check(rgba,false),"unchanged old cue cannot mask a competing current-frame winner");
     require(detectBigMap(fixture(true, true, true, 30)).detected, "horizontal shift not detected");
     require(!detectBigMap(fixture(false, true)).detected, "minus alone detected");
     require(!detectBigMap(fixture(true, false)).detected, "plus alone detected");

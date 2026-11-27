@@ -62,7 +62,7 @@ class BigMapMotionSession {
     void reset();
     BigMapSessionResult update(const cv::Mat &frame, const Refs &refs, int64_t timestamp_ns,
                                uint64_t generation, BigMapMotionStats *stats = nullptr,
-                               bool debug_points = false);
+                                bool debug_points = false, bool rgba = false);
 
   private:
     struct State;
