@@ -130,7 +130,9 @@ int main(int argc, char **argv) {
         std::cout
             << "index,timestampNs,width,height,generation,screenMode,dropped_before,epoch,ok,reason,bridge,"
                "step_scale,step_tx_3120,step_ty_3120,cum_scale,cum_tx_3120,cum_ty_3120,"
-               "roi_right,roi_inner,overlay_hidden,lk_ms,ransac_ms,update_ms\n"
+               "roi_right,roi_inner,overlay_hidden,lk_ms,ransac_ms,update_ms,"
+               "right_screen_fixed,right_warped_residual,right_fixed_residual,right_warped_changed_fraction,right_fixed_changed_fraction,"
+               "inner_screen_fixed,inner_warped_residual,inner_fixed_residual,inner_warped_changed_fraction,inner_fixed_changed_fraction\n"
             << std::setprecision(17);
         luxin::BigMapMotionSession session;
         Frame prev{};
@@ -162,8 +164,11 @@ int main(int argc, char **argv) {
             pose(stats.chain, v.width, v.height,
                  step.ok || std::string_view(step.reason) == "no_previous_frame");
             std::cout << ',' << verdict(stats.controls[0].verdict) << ',' << verdict(stats.controls[1].verdict)
-                      << ',' << stats.overlay_hidden << ',' << step.lk_ms << ',' << step.ransac_ms << ',' << ms
-                      << '\n';
+                      << ',' << stats.overlay_hidden << ',' << step.lk_ms << ',' << step.ransac_ms << ',' << ms;
+            for (const auto& c : stats.controls)
+                std::cout << ',' << c.screen_fixed << ',' << c.warped_residual << ',' << c.fixed_residual
+                          << ',' << c.warped_changed_fraction << ',' << c.fixed_changed_fraction;
+            std::cout << '\n';
         }
         if (!csv.eof() || csv.bad() || selected < 2)
             throw std::runtime_error("incomplete burst (need >=2 frames)");

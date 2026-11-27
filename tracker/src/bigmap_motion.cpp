@@ -134,6 +134,14 @@ BigMapMotionStep fit(const Points &p, const Points &q, std::vector<uchar> &mask)
     return r;
 }
 
+void requireFixedAdvantage(MotionControlObservation& c, bool moving) {
+    constexpr double kFixedHypothesisRatio = .5;
+    if (moving && c.verdict == ControlVerdict::Overlay &&
+        !(c.screen_fixed && c.fixed_residual <= kFixedHypothesisRatio*c.warped_residual &&
+          c.fixed_changed_fraction <= kFixedHypothesisRatio*c.warped_changed_fraction))
+        c.verdict = ControlVerdict::Unverifiable;
+}
+
 namespace {
 cv::Mat gray360(const cv::Mat &frame) {
     cv::Mat gray, small;
@@ -302,6 +310,12 @@ MotionControlObservation observeControl(cv::Rect base, const cv::Mat &prev, cons
         }
     }
     result.coverage = double(count) / box.area();
+    if (count) {
+        result.warped_residual = sum/count;
+        result.fixed_residual = fixed_sum/count;
+        result.warped_changed_fraction = double(changed)/count;
+        result.fixed_changed_fraction = double(fixed_changed)/count;
+    }
     if (result.coverage < kControlCoverage)
         return result;
     auto matches = [&](double total, int different) {
@@ -310,6 +324,9 @@ MotionControlObservation observeControl(cv::Rect base, const cv::Mat &prev, cons
     result.verdict = matches(sum, changed) ? ControlVerdict::Map : ControlVerdict::Overlay;
     result.screen_fixed =
         moving && result.verdict == ControlVerdict::Overlay && matches(fixed_sum, fixed_changed);
+    // A poor map warp alone is not evidence of a screen-fixed panel (LOD/text redraw
+    // and scale resampling also cause outliers). Both error measures must favour fixed UI.
+    requireFixedAdvantage(result,moving);
     return result;
 }
 bool validSimilarity(const Pose &p) {

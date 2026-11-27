@@ -315,9 +315,10 @@ void screen(const Map &map) {
               "pan outside confirmed ROI coverage");
     for (int i = 37; i <= 38; ++i) {
         auto panel = map.frame(centered(1, 15 - 10 * i, 10), false);
-        panel(cv::Rect(700, 130, 36, 90)).setTo(12);
+        auto content=panel(cv::Rect(690,115,70,140)); content.setTo(12);
+        for(int x=0;x<content.cols;x+=12) content.colRange(x,std::min(x+4,content.cols)).setTo(195);
         auto r = s.feed(panel);
-        check(r.geometry.matrix.empty() && s.stats.overlay_hidden, "moving panel beyond original coverage");
+        if (i==38) check(r.geometry.matrix.empty() && s.stats.overlay_hidden, "moving panel beyond original coverage");
     }
     Stub fast;
     fast.lock(map.frame(Pose::eye(), false));
@@ -414,12 +415,15 @@ void independentControls(const Map &map) {
     auto feed = [&](int dx, bool right, bool left, int dt) {
         x += dx;
         auto f = map.frame(centered(1, x));
-        if (right)
-            f(cv::Rect(700, 130, 36, 90)).setTo(20);
-        if (left)
-            f(cv::Rect(510, 140, 20, 70)).setTo(20);
+        auto panel=[&](cv::Rect box){
+            auto content=f(box); content.setTo(20);
+            for(int x=0;x<content.cols;x+=12) content.colRange(x,std::min(x+4,content.cols)).setTo(195);
+        };
+        if (right) panel({690,115,70,140});
+        if (left) panel({500,125,50,110});
         return !s.feed(f, dt * ms).geometry.matrix.empty();
     };
+    feed(-10, true, false, 10); // appearance alone is not fixed-UI evidence while moving
     check(!feed(-10, true, false, 10) && s.stats.controls[0].verdict == ControlVerdict::Overlay,
           "right overlay");
     for (int dx : {-20, -40, -65, -100})
@@ -434,6 +438,36 @@ void independentControls(const Map &map) {
               s.stats.controls[0].verdict == ControlVerdict::Unverifiable && s.stats.overlay_hidden,
           "successful non-adjacent bridge cannot clear the latch even on a clean map");
     check(feed(-8, false, false, 10), "next adjacent moving map releases last latch");
+}
+void zoomRedraw(const Map &map) {
+    for (auto errors : {cv::Vec4d(10,6,.10,.04),cv::Vec4d(10,4,.06,.04),cv::Vec4d(10,5,.08,.04)}) {
+        MotionControlObservation c;
+        c.verdict=ControlVerdict::Overlay; c.screen_fixed=true;
+        c.warped_residual=errors[0]; c.fixed_residual=errors[1];
+        c.warped_changed_fraction=errors[2]; c.fixed_changed_fraction=errors[3];
+        auto still=c; requireFixedAdvantage(still,false);
+        check(still.verdict==ControlVerdict::Overlay,"nonmoving gate unchanged");
+        requireFixedAdvantage(c,true);
+        check(c.verdict==(errors[1]==5 ? ControlVerdict::Overlay : ControlVerdict::Unverifiable),
+              "both independent error advantages required; equality passes");
+    }
+    Stub s; s.lock(map.frame(Pose::eye(),true,false));
+    int ambiguous=0;
+    for(int i=1;i<=8;++i) {
+        auto frame=map.frame(centered(std::pow(1.07,i)),true,false);
+        // Moving map with sparse text/texture redraw in the diagnostic ROI only.
+        // Feature pixels remain a true 1.07x zoom; there is no screen-fixed panel.
+        for(int y=130;y<220;y+=13)
+            for(int x=700;x<735;++x) frame.at<uchar>(y+(i%2),x)=uchar((i%2)?0:255);
+        auto r=s.feed(frame,67*ms);
+        check(s.stats.step.ok && !s.stats.overlay_hidden && r.phase=="tracking","zoom redraw must not latch panel");
+        const auto& c=s.stats.controls[0];
+        ambiguous += c.verdict==ControlVerdict::Unverifiable && c.coverage>=.90;
+        if(c.verdict==ControlVerdict::Unverifiable)
+            check(!c.screen_fixed || c.fixed_residual>.5*c.warped_residual ||
+                  c.fixed_changed_fraction>.5*c.warped_changed_fraction,"hypotheses did not favour fixed UI");
+    }
+    check(ambiguous>0,"redraw exercises poor-warp uncertainty");
 }
 void corrections(const Map &map) {
     Stub s;
@@ -626,6 +660,7 @@ int main(int argc, char **argv) try {
     repeatAndReverse(map);
     loss(map);
     screen(map);
+    zoomRedraw(map);
     cleanControls(map);
     independentControls(map);
     panelProbe(map, false);

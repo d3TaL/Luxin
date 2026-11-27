@@ -12,4 +12,5 @@ Pose predict(const Pose &previous, double dt_ratio, cv::Size size);
 // motion while the search ran. Current pose = Chain(now) * D.
 Pose correction(const Pose &snapshot_chain, const Pose &absolute);
 BigMapMotionStep fit(const Points &src, const Points &dst, std::vector<uchar> &inliers);
+void requireFixedAdvantage(MotionControlObservation& observation, bool moving);
 } // namespace luxin::motion

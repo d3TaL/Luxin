@@ -22,6 +22,8 @@ struct MotionControlObservation {
     ControlVerdict verdict = ControlVerdict::Unverifiable;
     double coverage = 0.;
     bool screen_fixed = false; // unwarped comparison passed while the map prediction failed during motion
+    double warped_residual = -1., fixed_residual = -1.; // mean absolute gray-level error; -1 = no samples
+    double warped_changed_fraction = -1., fixed_changed_fraction = -1.; // residual >24, same covered pixels
 };
 
 struct BigMapMotionStats {

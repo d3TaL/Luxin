@@ -1,5 +1,12 @@
 # Журнал изменений — Branch `feat/bigmap-detection-fable`
 
+## Панель MOTION: сравнение двух гипотез
+
+- В движении плохой warp сам по себе не ставит защёлку: fixed-UI гипотеза должна
+  пройти прежние гейты и иметь ≤0,5 ошибки warp по обеим метрикам. Иначе `unverifiable`.
+- В replay добавлены обе ошибки и `screen_fixed` для каждой ROI. На трёх дампах N=1
+  `overlay_hidden=0` на всех кадрах; synthetic ×1,07 с перерисовкой краёв не скрывается.
+
 ## `feat/bigmap-lk-tracking` — этап 2: desktop replay
 
 - Удалена per-step dead zone из цепочки: мелкие шаги не теряются перед зумом.

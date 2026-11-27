@@ -64,8 +64,11 @@ class ReplayTest(unittest.TestCase):
         self.assertEqual(native[0]['reason'], 'no_previous_frame')
         self.assertEqual(native[0]['step_scale'], '')
         self.assertAlmostEqual(float(native[0]['cum_scale']), 1)
-        self.assertEqual(native[-1]['roi_right'], 'overlay')
-        self.assertEqual(native[-1]['overlay_hidden'], '1')
+        # A panel appearing on the last moving frame is not yet screen-fixed evidence.
+        self.assertEqual(native[-1]['roi_right'], 'unverifiable')
+        self.assertEqual(native[-1]['overlay_hidden'], '0')
+        self.assertGreater(float(native[-1]['right_warped_residual']),0.)
+        self.assertGreater(float(native[-1]['right_fixed_residual']),0.)
         self.assertEqual(native[-1]['ok'], '1')  # valid relative LK despite hidden geometry
         self.assertTrue(all(float(r['update_ms'])>=float(r['lk_ms'])>=0 for r in native))
         steps, err, idx = compare(BINARY, self.dump)
