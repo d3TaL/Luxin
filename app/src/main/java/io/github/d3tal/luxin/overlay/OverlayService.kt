@@ -25,6 +25,7 @@ import android.widget.TextView
 import io.github.d3tal.luxin.capture.CaptureService
 import io.github.d3tal.luxin.tracker.BigMapMarkerFilter
 import io.github.d3tal.luxin.tracker.BigMapMarkerOverlay
+import io.github.d3tal.luxin.tracker.BigMapTrackerModeStore
 import io.github.d3tal.luxin.tracker.BigMapTestInfo
 import io.github.d3tal.luxin.tracker.LiveTrackingState
 import io.github.d3tal.luxin.tracker.LiveTrackingStatus
@@ -314,6 +315,15 @@ class OverlayService : Service() {
             renderMap(LiveTrackingStatus.state.value)
         }
 
+        var bigMapMode = BigMapTrackerModeStore.load(this)
+        val modeButton = hudButton("Большая карта: ${bigMapMode.name}") { }.apply {
+            setOnClickListener {
+                bigMapMode = bigMapMode.next()
+                CaptureService.setBigMapMode(this@OverlayService, bigMapMode)
+                text = "Большая карта: ${bigMapMode.name}"
+            }
+        }
+
         val snapButton = hudButton("📸 Снимок (обычный)") {
             CaptureService.takeSnapshot(this, hideOverlayDuringCapture = false)
         }
@@ -363,6 +373,7 @@ class OverlayService : Service() {
             addView(trackingText)
             addView(trackButton)
             addView(debugButton)
+            addView(modeButton)
             addView(testGridButton)
             addView(testPinButton)
             addView(statusText)

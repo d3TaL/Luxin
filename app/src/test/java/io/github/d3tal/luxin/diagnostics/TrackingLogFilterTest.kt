@@ -13,6 +13,22 @@ class TrackingLogFilterTest {
     private fun native(message: String) = "  815.123456  1234  1240 I LuxinTrackerJNI: $message"
     private fun capture(message: String) = "  815.123456  1234  1241 D LuxinCapture: $message"
 
+    @Test fun preservesMotionAggregatesAndOpenCvVersionWithoutPrivateFields() {
+        val step = "BigMapMotion stage=step tsNs=815123456789 gen=2 ok=1 reason=static_pixels corners=250 tracked=240 inliers=230 " +
+            "scaleStep=1.0003 txStep=0.02 tyStep=-0.01 lkMs=12 ransacMs=1 totalMs=18 convertMs=3 " +
+            "pathSinceAbs=12 zoomSinceAbs=0.1 absAgeS=2 bridge=0 chainEpoch=7 hidden=0"
+        val clean = TrackingLogFilter.sanitize(native(step), pid)!!
+        assertTrue(clean.endsWith(step))
+        for (stage in listOf("abs_request", "abs_result", "abs_apply", "abs_conflict", "lost"))
+            assertTrue(TrackingLogFilter.sanitize(native("BigMapMotion stage=$stage outcome=suspect jumpPx=150 conflicts=1"), pid)!!.contains("stage=$stage"))
+        val control = "BigMapMotion stage=control roi=0 outcome=unverifiable screenFixed=0 coverage=1 " +
+            "warpedResidual=6.7 fixedResidual=18.5 warpedFrac=0.05 fixedFrac=0.26"
+        assertTrue(TrackingLogFilter.sanitize(native(control), pid)!!.endsWith(control))
+        assertTrue(TrackingLogFilter.sanitize(native("BigMapMotion stage=init opencv=4.10.0"), pid)!!.contains("opencv=4.10.0"))
+        val unsafe = TrackingLogFilter.sanitize(native("BigMapMotion stage=init opencv=/data/private uid=123 x=42 matrix=[1,0]"), pid)!!
+        assertFalse(unsafe.contains("opencv=") || unsafe.contains("uid=") || unsafe.contains("x=") || unsafe.contains("matrix="))
+    }
+
     @Test
     fun preservesMotionFailureTimingAndPublicationFields() {
         val text = native("BigMap stage=return ts=815.123456789 frame=2340x1080 phase=moving mode=found " +

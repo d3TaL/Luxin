@@ -2,6 +2,7 @@
 #include "luxin/bigmap_detector.hpp"
 #include "luxin/bigmap_geometry.hpp"
 #include "luxin/bigmap_session.hpp"
+#include "luxin/bigmap_motion.hpp"
 
 #include <android/bitmap.h>
 #include <android/log.h>
@@ -32,6 +33,7 @@ struct NativeTrackerContext {
     std::vector<std::shared_ptr<luxin::LayerReference>> models;
     std::unique_ptr<luxin::SplitTracker> tracker;
     luxin::BigMapSession bigmap{luxin::registerBigMap};
+    luxin::BigMapMotionSession motion;
     double unit_scale_override = 0.0;
     double unit_scale = 0.75;
     int frame_width = 0;
@@ -158,6 +160,76 @@ void logBeforeBigMapAbsolute(const luxin::BigMapSessionResult& result, void* con
 } // namespace
 
 extern "C" {
+
+JNIEXPORT jstring JNICALL
+Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeBigMapMotionUpdate(
+    JNIEnv* env, jobject, jlong handle, jobject bitmap, jlong timestamp_ns, jlong generation, jboolean debug_points
+) {
+    auto* ctx=reinterpret_cast<NativeTrackerContext*>(handle);
+    if (!ctx) return env->NewStringUTF("{\"error\":\"closed tracker\"}");
+    std::lock_guard<std::mutex> lock(ctx->mutex);
+    try {
+        const auto begin=DiagnosticClock::now();
+        cv::Mat bgr;
+        if (!bitmap || timestamp_ns<0 || generation<0 || !bitmapToBgrMat(env,bitmap,bgr)) {
+            ctx->motion.reset();
+            return env->NewStringUTF("{\"error\":\"invalid motion input\"}");
+        }
+        const double convert_ms=diagnosticMs(begin);
+        luxin::BigMapMotionStats stats;
+        const auto result=ctx->motion.update(bgr,ctx->models,timestamp_ns,generation,&stats,debug_points);
+        const auto& g=result.geometry;
+        const auto& s=stats.step;
+        LOGI("BigMapMotion stage=step ts=%.9f tsNs=%lld gen=%lld ok=%d reason=%s corners=%d tracked=%d inliers=%d "
+             "scaleStep=%.9f txStep=%.6f tyStep=%.6f lkMs=%.3f ransacMs=%.3f totalMs=%.3f convertMs=%.3f "
+             "pathSinceAbs=%.6f zoomSinceAbs=%.6f absAgeS=%.3f bridge=%d chainEpoch=%llu hidden=%d",
+             timestamp_ns*1e-9,(long long)timestamp_ns,(long long)generation,s.ok,s.reason,s.corners,s.matches,s.inliers,
+             s.work(0,0),s.work(0,2),s.work(1,2),s.lk_ms,s.ransac_ms,diagnosticMs(begin),convert_ms,
+             stats.path_since_abs,stats.zoom_since_abs,stats.abs_age_s,stats.bridge,(unsigned long long)stats.epoch,stats.overlay_hidden);
+        if (stats.requested) LOGI("BigMapMotion stage=abs_request tsNs=%lld chainEpoch=%llu",(long long)timestamp_ns,(unsigned long long)stats.epoch);
+        if (std::string(stats.absolute)!="none") {
+            LOGI("BigMapMotion stage=abs_result tsNs=%lld outcome=%s jumpPx=%.6f conflicts=%u chainEpoch=%llu",
+                 (long long)timestamp_ns,stats.absolute,stats.jump_3120,stats.abs_conflicts,(unsigned long long)stats.epoch);
+            const std::string outcome(stats.absolute);
+            if (outcome=="initial" || outcome=="blend_small" || outcome=="blend_three")
+                LOGI("BigMapMotion stage=abs_apply tsNs=%lld outcome=%s",(long long)timestamp_ns,stats.absolute);
+            if (outcome=="suspect") LOGI("BigMapMotion stage=abs_conflict tsNs=%lld conflicts=%u",(long long)timestamp_ns,stats.abs_conflicts);
+        }
+        if (stats.lost) LOGI("BigMapMotion stage=lost tsNs=%lld",(long long)timestamp_ns);
+        if (stats.overlay_hidden) LOGI("BigMapMotion stage=screen_change tsNs=%lld hidden=1",(long long)timestamp_ns);
+        for(size_t i=0;i<stats.controls.size();++i) {
+            const auto& c=stats.controls[i];
+            const char* verdict=c.verdict==luxin::ControlVerdict::Map?"map":c.verdict==luxin::ControlVerdict::Overlay?"overlay":"unverifiable";
+            LOGI("BigMapMotion stage=control tsNs=%lld roi=%d outcome=%s screenFixed=%d coverage=%.6f warpedResidual=%.6f fixedResidual=%.6f warpedFrac=%.6f fixedFrac=%.6f",
+                 (long long)timestamp_ns,(int)i,verdict,c.screen_fixed,c.coverage,c.warped_residual,c.fixed_residual,c.warped_changed_fraction,c.fixed_changed_fraction);
+        }
+        std::ostringstream out; out.imbue(std::locale::classic());
+        out<<std::setprecision(17)<<"{\"version\":2,\"mode\":"<<jsonString(g.mode)<<",\"phase\":"<<jsonString(result.phase);
+        if(g.mode=="found") {
+            out<<",\"v2\":{\"space\":"<<jsonString(g.space)<<",\"reference\":"<<jsonString(g.reference)
+               <<",\"frameWidth\":"<<g.frame_width<<",\"frameHeight\":"<<g.frame_height
+               <<",\"timestampSeconds\":"<<g.timestamp_seconds<<",\"poseTimestampNs\":"<<timestamp_ns
+               <<",\"inliers\":"<<g.inliers<<",\"matches\":"<<g.matches<<",\"errorPx\":"<<g.error_px
+               <<",\"support\":"<<g.support<<",\"matrix\":[";
+            for(int i=0;i<6;++i) {if(i)out<<',';out<<g.matrix.at<double>(i/3,i%3);}
+            out<<"],\"velocity\":{\"dlogs_per_s\":"<<stats.velocity[0]<<",\"dtx_per_s\":"<<stats.velocity[1]<<",\"dty_per_s\":"<<stats.velocity[2]<<"}";
+            if(debug_points) {
+                out<<",\"framePoints\":["; bool first=true;
+                for(auto p:result.follow.debug_points) {
+                    if(!first)out<<',';first=false;
+                    out<<double(p.x)*g.frame_width/result.follow.working_size.width<<','<<double(p.y)*g.frame_height/result.follow.working_size.height;
+                }
+                out<<']';
+            }
+            out<<'}';
+        }
+        out<<'}';return env->NewStringUTF(out.str().c_str());
+    } catch(const std::exception&) {
+        ctx->motion.reset();
+        LOGI("BigMapMotion stage=error reason=registration_exception");
+        return env->NewStringUTF("{\"error\":\"motion update failed\"}");
+    }
+}
 
 JNIEXPORT jstring JNICALL
 Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeRegisterBigMapV2(
@@ -302,6 +374,7 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeCreate(
         ctx->unit_scale = unit_scale;
     }
     ctx->tracker = std::make_unique<luxin::SplitTracker>(ctx->models, ctx->unit_scale);
+    LOGI("BigMapMotion stage=init opencv=%s",cv::getVersionString().c_str());
     return reinterpret_cast<jlong>(ctx);
 }
 
@@ -329,6 +402,7 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeReset(
         ctx->tracker->reset();
     }
     ctx->bigmap.reset();
+    ctx->motion.reset();
     LOGI("BigMap stage=reset reason=tracker_reset");
 }
 
@@ -340,6 +414,7 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeResetBigMap(
     if (!ctx) return;
     std::lock_guard<std::mutex> lock(ctx->mutex);
     ctx->bigmap.reset();
+    ctx->motion.reset();
     LOGI("BigMap stage=reset reason=bigmap_reset");
 }
 
@@ -385,6 +460,7 @@ Java_io_github_d3tal_luxin_tracker_NativeSplitTracker_nativeAddLayerReferenceFro
         std::lock_guard<std::mutex> lock(ctx->mutex);
         ctx->models.push_back(std::move(ref));
         ctx->bigmap.reset();
+        ctx->motion.reset();
         LOGI("BigMap stage=reset reason=reference_added");
         ctx->tracker = std::make_unique<luxin::SplitTracker>(ctx->models, ctx->unit_scale);
         LOGI("Added layer reference %s/%s (total=%zu)", space.c_str(), layer.c_str(), ctx->models.size());

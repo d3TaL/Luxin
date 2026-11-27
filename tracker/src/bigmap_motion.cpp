@@ -134,11 +134,11 @@ BigMapMotionStep fit(const Points &p, const Points &q, std::vector<uchar> &mask)
     return r;
 }
 
-void requireFixedAdvantage(MotionControlObservation& c, bool moving) {
+void requireFixedAdvantage(MotionControlObservation &c, bool moving) {
     constexpr double kFixedHypothesisRatio = .5;
     if (moving && c.verdict == ControlVerdict::Overlay &&
-        !(c.screen_fixed && c.fixed_residual <= kFixedHypothesisRatio*c.warped_residual &&
-          c.fixed_changed_fraction <= kFixedHypothesisRatio*c.warped_changed_fraction))
+        !(c.screen_fixed && c.fixed_residual <= kFixedHypothesisRatio * c.warped_residual &&
+          c.fixed_changed_fraction <= kFixedHypothesisRatio * c.warped_changed_fraction))
         c.verdict = ControlVerdict::Unverifiable;
 }
 
@@ -205,7 +205,7 @@ bool staticPixels(const cv::Mat &prev, const cv::Mat &now, const cv::Mat &mask) 
     return true;
 }
 BigMapMotionStep track(const cv::Mat &prev, const cv::Mat &now, const Masks &masks,
-                       const std::optional<Pose> &prediction) {
+                       const std::optional<Pose> &prediction, bool debug_points = false) {
     auto start = Clock::now();
     std::vector<cv::Point2f> points;
     cv::goodFeaturesToTrack(prev, points, 250, .01, std::max(6, prev.rows / 36), masks.corners, 7);
@@ -244,6 +244,10 @@ BigMapMotionStep track(const cv::Mat &prev, const cv::Mat &now, const Masks &mas
         auto begin_fit = Clock::now();
         std::vector<uchar> inliers;
         r = fit(p, q, inliers);
+        if (debug_points && r.ok)
+            for (size_t i = 0; i < q.size() && r.debug_points.size() < 48; ++i)
+                if (inliers[i] && q[i].x >= 0 && q[i].y >= 0 && q[i].x < now.cols && q[i].y < now.rows)
+                    r.debug_points.push_back(q[i]);
         r.ransac_ms = elapsed(begin_fit);
         return r;
     };
@@ -311,10 +315,10 @@ MotionControlObservation observeControl(cv::Rect base, const cv::Mat &prev, cons
     }
     result.coverage = double(count) / box.area();
     if (count) {
-        result.warped_residual = sum/count;
-        result.fixed_residual = fixed_sum/count;
-        result.warped_changed_fraction = double(changed)/count;
-        result.fixed_changed_fraction = double(fixed_changed)/count;
+        result.warped_residual = sum / count;
+        result.fixed_residual = fixed_sum / count;
+        result.warped_changed_fraction = double(changed) / count;
+        result.fixed_changed_fraction = double(fixed_changed) / count;
     }
     if (result.coverage < kControlCoverage)
         return result;
@@ -326,7 +330,7 @@ MotionControlObservation observeControl(cv::Rect base, const cv::Mat &prev, cons
         moving && result.verdict == ControlVerdict::Overlay && matches(fixed_sum, fixed_changed);
     // A poor map warp alone is not evidence of a screen-fixed panel (LOD/text redraw
     // and scale resampling also cause outliers). Both error measures must favour fixed UI.
-    requireFixedAdvantage(result,moving);
+    requireFixedAdvantage(result, moving);
     return result;
 }
 bool validSimilarity(const Pose &p) {
@@ -416,6 +420,7 @@ struct BigMapMotionSession::State {
     std::array<bool, 2> overlay{};
     std::optional<Snapshot> snapshot;
     std::future<BigMapGeometry> worker;
+    bool debug_points = false;
 
     void invalidate(bool new_context = true) {
         ++epoch;
@@ -572,7 +577,7 @@ struct BigMapMotionSession::State {
         // never stamp the absolute result with the consumption time. Rebase only on success.
         if (ts <= snap->ts || ts - snap->ts > kRetain || (!snap->connected && e.lost_ts < 0))
             return;
-        auto bridge = track(snap->gray, gray, e.masks, prediction(ts - snap->ts, true));
+        auto bridge = track(snap->gray, gray, e.masks, prediction(ts - snap->ts, true), debug_points);
         if (!bridge.ok)
             return;
         if (snap->connected && it != e.history.end() && e.applied) {
@@ -639,7 +644,7 @@ struct BigMapMotionSession::State {
             e.record(ts, gray);
         else {
             const int64_t gap = ts - e.good_ts;
-            out.step = track(e.good, gray, e.masks, prediction(gap, e.failures > 0));
+            out.step = track(e.good, gray, e.masks, prediction(gap, e.failures > 0), debug_points);
             if (out.step.ok && gap <= kBridge && e.failures < kFailures && e.lost_ts < 0) {
                 out.bridge = e.failures > 0;
                 e.failures = 0;
@@ -707,6 +712,8 @@ struct BigMapMotionSession::State {
         r.geometry.inliers = out.step.inliers;
         r.geometry.error_px = out.step.error_px * e.size.height / gray.rows;
         r.phase = "tracking";
+        r.follow.working_size = gray.size();
+        r.follow.debug_points = out.step.debug_points;
         r.measured_motion = true;
         out.velocity = e.velocity;
         return r;
@@ -728,8 +735,10 @@ void BigMapMotionSession::reset() {
     state_->invalidate();
 }
 BigMapSessionResult BigMapMotionSession::update(const cv::Mat &frame, const Refs &refs, int64_t timestamp_ns,
-                                                uint64_t generation, BigMapMotionStats *stats) {
+                                                uint64_t generation, BigMapMotionStats *stats,
+                                                bool debug_points) {
     BigMapMotionStats out;
+    state_->debug_points = debug_points;
     auto r = state_->update(frame, refs, timestamp_ns, generation, out);
     out.epoch = state_->epoch;
     if (stats)

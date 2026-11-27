@@ -45,6 +45,10 @@ import io.github.d3tal.luxin.tracker.BigMapFrame
 import io.github.d3tal.luxin.tracker.Publication
 import io.github.d3tal.luxin.tracker.publishTrackingResult
 import io.github.d3tal.luxin.tracker.bigMapGeometryRemainingMs
+import io.github.d3tal.luxin.tracker.BigMapTrackerMode
+import io.github.d3tal.luxin.tracker.BigMapTrackerModeStore
+import io.github.d3tal.luxin.tracker.BigMapModeSelection
+import io.github.d3tal.luxin.tracker.BigMapWorkerRevision
 import io.github.d3tal.luxin.tracker.LiveTrackingCadence
 import io.github.d3tal.luxin.tracker.LiveProcessingRate
 import io.github.d3tal.luxin.tracker.ReferencePackStore
@@ -123,6 +127,7 @@ class CaptureService : Service() {
     private var receivedContentSize = false
     @Volatile private var capturedContentVisible = true
     @Volatile private var trackingRevision = 0L
+    private var bigMapModeSelection = BigMapModeSelection()
     private var trackingJob: Job? = null
     private var geometryExpiryJob: Job? = null
     // Epoch and status publications are confined to Main, preventing late native results after Stop.
@@ -163,6 +168,8 @@ class CaptureService : Service() {
         const val ACTION_TAKE_SNAPSHOT = "io.github.d3tal.luxin.capture.ACTION_TAKE_SNAPSHOT"
         const val ACTION_TRACK_START = "io.github.d3tal.luxin.capture.ACTION_TRACK_START"
         const val ACTION_TRACK_STOP = "io.github.d3tal.luxin.capture.ACTION_TRACK_STOP"
+        private const val ACTION_BIGMAP_MODE = "io.github.d3tal.luxin.capture.ACTION_BIGMAP_MODE"
+        private const val EXTRA_BIGMAP_MODE = "extra_bigmap_mode"
         const val ACTION_DUMP_START = "io.github.d3tal.luxin.capture.ACTION_DUMP_START"
         const val ACTION_DUMP_STOP = "io.github.d3tal.luxin.capture.ACTION_DUMP_STOP"
         const val EXTRA_RESULT_CODE = "extra_result_code"
@@ -195,6 +202,14 @@ class CaptureService : Service() {
             context.startService(Intent(context, CaptureService::class.java).apply { action = ACTION_TRACK_STOP })
         }
 
+        fun setBigMapMode(context: Context, mode: BigMapTrackerMode) {
+            if (!isRunning.value) { BigMapTrackerModeStore.save(context, mode); return }
+            context.startService(Intent(context, CaptureService::class.java).apply {
+                action = ACTION_BIGMAP_MODE
+                putExtra(EXTRA_BIGMAP_MODE, mode.name)
+            })
+        }
+
         fun startFrameDump(context: Context) {
             context.startService(Intent(context, CaptureService::class.java).apply { action = ACTION_DUMP_START })
         }
@@ -215,6 +230,7 @@ class CaptureService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        bigMapModeSelection = BigMapModeSelection(BigMapTrackerModeStore.load(this))
         requireNotNull(getSystemService(NotificationManager::class.java)).createNotificationChannel(
             NotificationChannel(CHANNEL, "Luxin Screen Capture", NotificationManager.IMPORTANCE_LOW)
         )
@@ -239,6 +255,21 @@ class CaptureService : Service() {
             }
             ACTION_TRACK_STOP -> {
                 stopLiveTracking()
+                if (!_isRunning.value) stopSelf()
+            }
+            ACTION_BIGMAP_MODE -> {
+                val mode = BigMapTrackerMode.fromStored(intent.getStringExtra(EXTRA_BIGMAP_MODE))
+                bigMapModeSelection.change(mode) {
+                    // Main-thread invalidation happens before the worker can publish a late JNI result.
+                    // The same serialized owner resets BOTH native sessions at its next revision check.
+                    trackingRevision++
+                    BigMapTrackerModeStore.save(this, mode)
+                    geometryExpiryJob?.cancel()
+                    if (LiveTrackingStatus.state.value.enabled)
+                        LiveTrackingStatus.publish(LiveTrackingState(enabled = true, status = "paused",
+                            message = "Режим большой карты: ${mode.name}; новая привязка"))
+                    Log.d(TAG, "BigMap invalidate=tracker_mode rev=$trackingRevision")
+                }
                 if (!_isRunning.value) stopSelf()
             }
             ACTION_DUMP_START -> {
@@ -629,7 +660,7 @@ class CaptureService : Service() {
                 val names = pack.manifest.layers.associate { "${it.space}/${it.id}" to it.name }
                 var lastTimestamp = 0L
                 var lastGeneration = -1L
-                var lastRevision = -1L
+                val workerRevision = BigMapWorkerRevision()
                 var previousProcessMs = 0L
                 var displayShortSide = -1
                 var paused = true
@@ -638,7 +669,7 @@ class CaptureService : Service() {
                 val bigMap = BigMapConfirmation()
                 suspend fun waiting(message: String, width: Int = 0, height: Int = 0, screenMode: String = "unknown",
                                     reason: String) {
-                    Log.d(TAG, "BigMap waiting=$reason epoch=$epoch gen=$lastGeneration rev=$lastRevision " +
+                    Log.d(TAG, "BigMap waiting=$reason epoch=$epoch gen=$lastGeneration rev=${workerRevision.revision} " +
                         "lastTsNs=$lastTimestamp screen=$screenMode " +
                         "resetBigMap=${screenMode != "big_map" && screenMode != "big_map_pending"} resetAll=${!paused}")
                     if (screenMode != "big_map" && screenMode != "big_map_pending") {
@@ -657,13 +688,12 @@ class CaptureService : Service() {
                     ensureActive()
                     val loopStart = SystemClock.elapsedRealtime()
                     val frameRevision = trackingRevision
-                    if (lastRevision != frameRevision) {
-                        Log.d(TAG, "BigMap reset=revision epoch=$epoch old=$lastRevision new=$frameRevision")
+                    workerRevision.observe(frameRevision, bigMapModeSelection) {
+                        Log.d(TAG, "BigMap reset=revision epoch=$epoch old=${workerRevision.revision} new=$frameRevision")
                         engine.reset()
                         bigMap.reset()
                         lastScreenMode = "unknown"
                         bigMapRate.reset()
-                        lastRevision = frameRevision
                     }
                     if (!capturedContentVisible || snapshotBusy.get()) {
                         waiting(if (!capturedContentVisible) "Захватываемое приложение не видно" else "Пауза: ручной снимок",
@@ -768,8 +798,10 @@ class CaptureService : Service() {
                                     "readMs=$readMs bitmapMs=$bitmapMs gateMs=$gateMs")
                                 val start = SystemClock.elapsedRealtime()
                                 val observed = BigMapFrame(frameRevision, frame.generation, frame.timestampNs, frame.width, frame.height)
-                                val decoded = BigMapGeometryDecoder.decodeLiveV2(engine.registerBigMapV2Json(
-                                    bitmap, frame.timestampNs / 1_000_000_000.0, OverlayService.showTrackingPoints))
+                                val rawGeometry = if (workerRevision.mode == BigMapTrackerMode.MOTION)
+                                    engine.bigMapMotionUpdateJson(bitmap, frame.timestampNs, frame.generation, OverlayService.showTrackingPoints)
+                                else engine.registerBigMapV2Json(bitmap, frame.timestampNs / 1_000_000_000.0, OverlayService.showTrackingPoints)
+                                val decoded = BigMapGeometryDecoder.decodeLiveV2(rawGeometry)
                                 // A return log is NOT publication: cancellation/freshness gates below are unchanged.
                                 Log.d(TAG, "BigMapV2 stage=native_return $diagnosticKey phase=${decoded.phase} mode=${decoded.mode} version=${decoded.version} " +
                                     "callDecodeMs=${SystemClock.elapsedRealtime() - start}")

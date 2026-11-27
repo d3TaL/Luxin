@@ -95,6 +95,16 @@ class NativeSplitTracker(unitScale: Double = 0.0) : Closeable {
     /** V2 native entry point with version=2 in payload. */
     private external fun nativeRegisterBigMapV2(handle: Long, frameBitmap: Bitmap, timestampSeconds: Double, debugPoints: Boolean): String
 
+    @Synchronized
+    fun bigMapMotionUpdateJson(frameBitmap: Bitmap, timestampNs: Long, generation: Long, debugPoints: Boolean = false): String {
+        if (handle == 0L) return "{\"error\":\"closed tracker\"}"
+        require(timestampNs >= 0 && generation >= 0)
+        return nativeBigMapMotionUpdate(handle, frameBitmap, timestampNs, generation, debugPoints)
+    }
+
+    private external fun nativeBigMapMotionUpdate(handle: Long, frameBitmap: Bitmap, timestampNs: Long,
+                                                  generation: Long, debugPoints: Boolean): String
+
     /**
      * Атомарный снимок текущего состояния сессии без запуска нового вычисления SIFT.
      * Возвращает последнюю известную геометрию (v2 envelope) или acquiring, если привязки нет.

@@ -65,6 +65,7 @@ internal fun publishTrackingResult(state: LiveTrackingState, epoch: Long, curren
     val obsolete = (frame != null && !bigMapFrameIsCurrent(frame.revision, revision, frame.generation,
         generation, frame.timestampNs, nowNs)) || (geometry != null && (frame == null ||
         geometry.frameWidth != frame.width || geometry.frameHeight != frame.height ||
+        (geometry.poseTimestampNs != null && geometry.poseTimestampNs != frame.timestampNs) ||
         kotlin.math.abs(geometry.timestampSeconds - frame.timestampNs / 1_000_000_000.0) >= 1e-6))
     val reason = if (obsolete) "Привязка устарела; ожидаю обновление" else blockedMessage
     if (reason != null) {

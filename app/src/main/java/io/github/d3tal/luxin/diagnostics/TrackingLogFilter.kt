@@ -27,7 +27,9 @@ internal object TrackingLogFilter {
         "scale", "angleDeg", "hullFrac", "overlap", "overlapFrac", "denseChanged", "denseFrac",
         "tilesVisited", "tileChanged", "tileValid", "tileFrac", "roi", "mean", "changed", "pixels",
         "frac", "inputAgeMs", "readMs", "bitmapMs", "gateMs", "callDecodeMs", "nativeMs", "ageMs",
-        "actualFps", "targetFps", "version"
+        "actualFps", "targetFps", "version", "ok", "corners", "tracked", "scaleStep", "txStep", "tyStep",
+        "lkMs", "ransacMs", "totalMs", "pathSinceAbs", "zoomSinceAbs", "absAgeS", "bridge", "chainEpoch",
+        "hidden", "jumpPx", "conflicts", "screenFixed", "coverage", "warpedResidual", "fixedResidual", "warpedFrac", "fixedFrac"
     )
     private val booleanKeys = setOf("visibility", "resetBigMap", "resetAll", "obsolete", "blocked", "geometry")
     private val enumKeys = setOf("stage", "phase", "mode", "reset", "reason", "follow", "settle",
@@ -46,9 +48,13 @@ internal object TrackingLogFilter {
         "enter_bigmap", "visibility_or_snapshot", "no_fresh_frame", "input_age", "unsupported_geometry",
         "generation_after_gate", "ui_pending", "generation_or_age_after_native", "minimap_bounds",
         "minimap_arrow", "generation_after_minimap", "start", "stop", "closed", "cancelled", "snapshot",
-        "expiry", "epoch"
+        "expiry", "epoch", "init", "step", "control", "abs_request", "abs_result", "abs_apply", "abs_conflict",
+        "lost", "map", "overlay", "unverifiable", "static_pixels", "no_previous_frame", "insufficient_corners",
+        "insufficient_fb_matches", "degenerate_inliers", "bridge_expired", "invalid_chain", "invalid_frame",
+        "invalid_timestamp", "old_generation", "search_failed", "space_change", "suspect", "initial", "blend_small",
+        "blend_three", "tracker_mode", "ok", "screen_change"
     )
-    private val nativeKinds = setOf("BigMap", "BigMapFollow", "BigMapControl", "BigMapV2", "BigMapSnapshot")
+    private val nativeKinds = setOf("BigMap", "BigMapFollow", "BigMapControl", "BigMapV2", "BigMapSnapshot", "BigMapMotion")
 
     fun sanitize(line: String, processId: Int): String? {
         if (line.length > MAX_LINE_CHARS || line.any { it.isISOControl() }) return null
@@ -68,6 +74,7 @@ internal object TrackingLogFilter {
                 key == "frame" || key == "work" -> dimensions.matches(text)
                 key == "rect" || key == "worstVisitedTile" -> rectangle.matches(text)
                 key == "kp" || key == "desc" -> pair.matches(text)
+                key == "opencv" -> Regex("""\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?""").matches(text)
                 else -> false
             }
             if (accepted) "$key=$text" else null

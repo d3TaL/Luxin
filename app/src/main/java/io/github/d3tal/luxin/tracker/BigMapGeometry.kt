@@ -25,7 +25,9 @@ data class BigMapGeometry(
     val errorPx: Double,
     val support: Double,
     val version: Int = 1,
-    val framePoints: List<Double> = emptyList() // Debug-only x,y pairs in CURRENT captured frame pixels, not world coordinates.
+    val framePoints: List<Double> = emptyList(), // Debug-only pairs in CURRENT captured frame pixels.
+    val velocity: BigMapVelocity? = null,
+    val poseTimestampNs: Long? = null
 ) {
     init {
         require(space.isNotBlank()) { "space must not be blank" }
@@ -41,6 +43,12 @@ data class BigMapGeometry(
         require(errorPx.isFinite() && errorPx >= 0.0) { "errorPx must be finite and >= 0: $errorPx" }
         require(support.isFinite() && support in 0.0..1.0) { "support must be in 0..1: $support" }
         require(version >= 1) { "version must be >= 1: $version" }
+        require((velocity == null) == (poseTimestampNs == null)) { "incomplete motion pose" }
+        poseTimestampNs?.let {
+            require(version == 2 && it >= 0 && abs(it / 1_000_000_000.0 - timestampSeconds) < 1e-6) {
+                "motion timestamp differs from frame"
+            }
+        }
         require(framePoints.size <= 96 && framePoints.size % 2 == 0 && framePoints.indices.all { i ->
             val limit = if (i % 2 == 0) frameWidth else frameHeight
             framePoints[i] >= 0.0 && framePoints[i] < limit
@@ -130,10 +138,13 @@ private data class NativeBigMapGeometry(
     val space: String, val reference: String, val matrix: List<Double>,
     val frameWidth: Int, val frameHeight: Int, val timestampSeconds: Double,
     val inliers: Int, val matches: Int, val errorPx: Double, val support: Double,
-    val framePoints: List<Double> = emptyList()
+    val framePoints: List<Double> = emptyList(),
+    val velocity: BigMapVelocity? = null,
+    val poseTimestampNs: Long? = null
 ) {
     fun validated(version: Int) = BigMapGeometry(space, reference, matrix, frameWidth, frameHeight,
-        timestampSeconds, inliers, matches, errorPx, support, version, if (version == 2) framePoints else emptyList())
+        timestampSeconds, inliers, matches, errorPx, support, version, if (version == 2) framePoints else emptyList(),
+        velocity, poseTimestampNs)
 }
 
 object BigMapGeometryDecoder {

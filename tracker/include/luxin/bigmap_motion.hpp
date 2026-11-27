@@ -15,6 +15,7 @@ struct BigMapMotionStep {
     int corners = 0, matches = 0, inliers = 0;
     double error_px = 0, lk_ms = 0, ransac_ms = 0;
     cv::Matx33d work = cv::Matx33d::eye(); // last good -> current, working pixels
+    std::vector<cv::Point2f> debug_points; // optional inlier destinations, at most 48 working-pixel pairs
 };
 
 enum class ControlVerdict { Unverifiable, Map, Overlay };
@@ -53,7 +54,8 @@ class BigMapMotionSession {
     // Call reset on pause, reference mutation and external map invalidation, even within a generation.
     void reset();
     BigMapSessionResult update(const cv::Mat &frame, const Refs &refs, int64_t timestamp_ns,
-                               uint64_t generation, BigMapMotionStats *stats = nullptr);
+                               uint64_t generation, BigMapMotionStats *stats = nullptr,
+                               bool debug_points = false);
 
   private:
     struct State;
