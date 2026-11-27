@@ -31,11 +31,12 @@ internal object TrackingLogFilter {
         "lkMs", "ransacMs", "totalMs", "pathSinceAbs", "zoomSinceAbs", "absAgeS", "bridge", "chainEpoch",
         "hidden", "jumpPx", "conflicts", "screenFixed", "coverage", "warpedResidual", "fixedResidual", "warpedFrac", "fixedFrac",
         "staticLatchFrames", "staticReleaseFrames", "fallback_tried", "fallback_ms", "fallback_ok", "fallback_inliers",
-        "fallback_matches", "fallback_scale", "recovery_ms", "fallbackMs", "publishMs", "loopMs", "idleMs"
+        "fallback_matches", "fallback_scale", "recovery_ms", "fallbackMs", "publishMs", "loopMs", "idleMs",
+        "ageAtDrawMs", "ageAtDrawP95Ms", "dtMs", "predictedDraws", "disabledDraws", "invalidAgeDraws", "noPoseDraws", "nonMotionDraws", "measuredDraws", "dampedDraws"
     )
-    private val booleanKeys = setOf("visibility", "resetBigMap", "resetAll", "obsolete", "blocked", "geometry")
+    private val booleanKeys = setOf("visibility", "resetBigMap", "resetAll", "obsolete", "blocked", "geometry", "extrapolated")
     private val enumKeys = setOf("stage", "phase", "mode", "reset", "reason", "follow", "settle",
-        "outcome", "pixelOutcome", "refresh", "waiting", "screen", "lifecycle", "invalidate", "latchReason", "absReason")
+        "outcome", "pixelOutcome", "refresh", "waiting", "screen", "lifecycle", "invalidate", "latchReason", "absReason", "clock", "sample")
     private val enumValues = setOf(
         "none", "begin", "before_absolute", "return", "native_return", "checked", "publish",
         "publish_dropped", "error", "reset", "tracking", "confirming", "moving", "acquiring",
@@ -56,7 +57,7 @@ internal object TrackingLogFilter {
         "invalid_timestamp", "old_generation", "search_failed", "space_change", "suspect", "initial", "blend_small",
         "blend_three", "tracker_mode", "ok", "screen_change", "static_latch", "static_latch_pending", "static_release", "static_release_pending",
         "sift_fallback", "epoch_mismatch", "not_found", "frame_mismatch", "retain_expired", "invalid", "bridge_failed", "continuous", "measured_bridge", "failures",
-        "snapshot_conflict", "unbound_conflict", "cycle", "MOTION", "LEGACY"
+        "snapshot_conflict", "unbound_conflict", "cycle", "MOTION", "LEGACY", "draw", "monotonic", "last_draw"
     )
     private val nativeKinds = setOf("BigMap", "BigMapFollow", "BigMapControl", "BigMapV2", "BigMapSnapshot", "BigMapMotion")
 

@@ -6,6 +6,7 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.util.DisplayMetrics
 import android.util.TypedValue
+import android.util.Log
 import android.view.View
 import io.github.d3tal.luxin.data.LocalMarkerRecord
 import kotlin.math.atan2
@@ -51,6 +52,34 @@ class BigMapMarkerOverlay(context: Context) : View(context) {
 
     private var markers: List<BigMapMarkerWithLayer> = emptyList()
     private var geometry: BigMapGeometry? = null
+    private val drawMotion = DrawMotionHistory()
+    private var phase = "unknown"
+    private var predictionEnabled = false
+    private val ages = ArrayList<Long>(32)
+    private val reasons = mutableMapOf<String,Int>()
+    private var draws = 0
+
+    internal fun setDrawMotion(g: BigMapGeometry?, phase: String, enabled: Boolean) {
+        this.phase = phase
+        if (predictionEnabled != enabled) { ages.clear(); reasons.clear(); draws = 0 }
+        predictionEnabled = enabled
+        drawMotion.observe(g,phase)
+    }
+
+    private fun recordDraw(pose: DrawPose) {
+        pose.ageMs?.let { ages.add(it) }
+        reasons[pose.reason] = 1+(reasons[pose.reason] ?: 0)
+        if (++draws < 32) return
+        ages.sort()
+        val median = if (ages.isEmpty()) -1.0 else (ages[(ages.size-1)/2]+ages[ages.size/2])*.5
+        val p95 = if (ages.isEmpty()) -1 else ages[(95*ages.size+99)/100-1]
+        val predictions = (reasons["predicted"] ?: 0)+(reasons["damped"] ?: 0)
+        Log.d("LuxinCapture","BigMap stage=draw clock=monotonic ageAtDrawMs=$median ageAtDrawP95Ms=$p95 " +
+            "dtMs=${pose.dtMs} extrapolated=${pose.dtMs>0} sample=last_draw predictedDraws=$predictions disabledDraws=${reasons["disabled"] ?: 0} " +
+            "invalidAgeDraws=${reasons["invalid_age"] ?: 0} noPoseDraws=${reasons["no_pose"] ?: 0} " +
+            "nonMotionDraws=${reasons["non_motion"] ?: 0} measuredDraws=${reasons["measured"] ?: 0} dampedDraws=${reasons["damped"] ?: 0}")
+        ages.clear(); reasons.clear(); draws = 0
+    }
     private var showPoints = false
     private val pointPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = android.graphics.Color.GREEN }
     private val pointOutline = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = android.graphics.Color.BLACK }
@@ -132,8 +161,16 @@ class BigMapMarkerOverlay(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        drawTest(canvas)
-        val geom = geometry ?: return
+        val measured = geometry ?: testInfo?.geometry
+        val nowNs = System.nanoTime()
+        val pose = poseForDraw(measured,phase,nowNs,predictionEnabled,drawMotion.damped)
+        recordDraw(pose)
+        val displayed = pose.geometry
+        drawTest(canvas,displayed)
+        if (displayed != null && pose.dtMs > 0 && nowNs - (displayed.poseTimestampNs ?: nowNs) < 120_000_000L)
+            postInvalidateOnAnimation()
+        if (geometry == null) return
+        val geom = displayed ?: return
         // A redraw can observe resized canvas bounds before capture publishes its invalidation.
         if (!geom.fitsDisplay(canvas.width, canvas.height)) return
 
@@ -174,9 +211,12 @@ class BigMapMarkerOverlay(context: Context) : View(context) {
         canvas.drawText(text, x, y, gridTextPaint)
     }
 
-    private fun drawTest(canvas: Canvas) {
+    private fun drawTest(canvas: Canvas, displayed: BigMapGeometry?) {
         val info = testInfo ?: return
-        val geom = info.geometry
+        val geom = displayed
+        val pinFrame = if (geom === info.geometry) testPinFrame else probe.pin?.let { pin ->
+            geom?.takeIf { it.space == pin.space }?.project(pin.x,pin.y)
+        }
         val w = canvas.width.toFloat()
         val h = canvas.height.toFloat()
         var step = Double.NaN
@@ -215,7 +255,7 @@ class BigMapMarkerOverlay(context: Context) : View(context) {
                 trailPaint.style = Paint.Style.STROKE
             }
 
-            testPinFrame?.let { (fx, fy) ->
+            pinFrame?.let { (fx, fy) ->
                 val px = (fx * s).toFloat()
                 val py = (fy * s).toFloat()
                 val r = dp(14f)
@@ -251,13 +291,13 @@ class BigMapMarkerOverlay(context: Context) : View(context) {
                 }
             }
         }
-        drawBadge(canvas, info, step)
+        drawBadge(canvas, if (geom === info.geometry) info else info.copy(geometry=geom), step, pinFrame)
     }
 
-    private fun drawBadge(canvas: Canvas, info: BigMapTestInfo, step: Double) {
+    private fun drawBadge(canvas: Canvas, info: BigMapTestInfo, step: Double, pinFrame: Pair<Double,Double>?) {
         val geom = info.geometry
         val pin = probe.pin
-        val onScreen = testPinFrame?.let { (fx, fy) ->
+        val onScreen = pinFrame?.let { (fx, fy) ->
             geom != null && fx >= 0.0 && fx < geom.frameWidth && fy >= 0.0 && fy < geom.frameHeight
         }
         val lines = buildList {

@@ -275,9 +275,11 @@ class OverlayService : Service() {
         }
         trackButton.isEnabled = CaptureService.isRunning.value
 
+        var predict = BigMapTrackerModeStore.drawPrediction(this)
         fun renderMap(s: LiveTrackingState) {
             val overlay = bigMapMarkerOverlay ?: return
             val g = s.bigMapGeometry
+            overlay.setDrawMotion(g,s.bigMapGeometryMode,predict)
             val layer = s.markerLayer
             val markers = if (g != null && layer != null) BigMapMarkerFilter.filterMarkersForBigMap(
                 g.space, layer, s.frameWidth, s.frameHeight, g) else emptyList()
@@ -321,6 +323,15 @@ class OverlayService : Service() {
                 bigMapMode = bigMapMode.next()
                 CaptureService.setBigMapMode(this@OverlayService, bigMapMode)
                 text = "Большая карта: ${bigMapMode.name}"
+            }
+        }
+        fun predictionLabel() = "Экстраполяция: " + if (predict) "вкл" else "выкл"
+        val predictionButton = hudButton(predictionLabel()) { }.apply {
+            setOnClickListener {
+                predict = !predict
+                BigMapTrackerModeStore.setDrawPrediction(this@OverlayService,predict)
+                text = predictionLabel()
+                renderMap(LiveTrackingStatus.state.value)
             }
         }
 
@@ -374,6 +385,7 @@ class OverlayService : Service() {
             addView(trackButton)
             addView(debugButton)
             addView(modeButton)
+            addView(predictionButton)
             addView(testGridButton)
             addView(testPinButton)
             addView(statusText)

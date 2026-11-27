@@ -62,6 +62,36 @@ class BigMapMotionTest {
         assertEquals(tiny.matrix, extrapolatedBigMapMatrix(tiny, "tracking", 10100000000L, true))
     }
 
+    @Test fun drawPathDefaultsToExactMeasuredGeometryAndDampsAccelerationReversal() {
+        val g = requireNotNull(BigMapGeometryDecoder.decodeLiveV2(wire()).geometry)
+        val ts = g.poseTimestampNs!!
+        val off = poseForDraw(g,"tracking",ts+150_000_000,DEFAULT_DRAW_PREDICTION,false)
+        assertSame(g,off.geometry)
+        assertEquals(g.toDisplay(12.0,29.0,1560,720),off.geometry!!.toDisplay(12.0,29.0,1560,720))
+        assertNull(poseForDraw(g,"tracking",ts-1,true,false).geometry)
+        assertNull(poseForDraw(g,"tracking",ts+1_000_000_001,true,false).geometry)
+        assertNull(poseForDraw(g,"moving",ts,true,false).geometry)
+        assertNull(poseForDraw(null,"tracking",ts,true,false).geometry)
+        val legacy = g.copy(velocity=null,poseTimestampNs=null)
+        for (pose in listOf(g,legacy)) {
+            assertNull(poseForDraw(pose,"tracking",ts-1,false,false).geometry)
+            assertSame(pose,poseForDraw(pose,"tracking",ts+1_000_000_000L,false,false).geometry)
+            assertNull(poseForDraw(pose,"tracking",ts+1_000_000_001L,false,false).geometry)
+        }
+        val history = DrawMotionHistory(); history.observe(g,"tracking")
+        fun advance(ns: Long,v: Double) = g.copy(timestampSeconds=ns/1e9,poseTimestampNs=ns,velocity=BigMapVelocity(0.2,v,-10.0))
+        history.observe(advance(ts+40_000_000,65.0),"tracking")
+        history.observe(advance(ts+60_000_000,65.0),"tracking")
+        val last = advance(ts+80_000_000,40.0); history.observe(last,"tracking"); history.observe(last,"tracking")
+        assertTrue(history.damped)
+        val now = last.poseTimestampNs!! + 120_000_001L
+        val predicted = poseForDraw(last,"tracking",now,true,history.damped)
+        assertEquals(60.0,predicted.dtMs,0.0)
+        assertEquals(extrapolate(last.matrix,last.velocity!!,.060,780,360),predicted.geometry!!.matrix)
+        history.observe(null,"rejected"); history.observe(last,"tracking"); assertFalse(history.damped)
+        assertEquals(120.0,poseForDraw(last,"tracking",now,true,false).dtMs,0.0)
+    }
+
     @Test fun motionResponseCannotPublishAfterModeSwitchOrBriefPauseResume() {
         val g = requireNotNull(BigMapGeometryDecoder.decodeLiveV2(wire()).geometry)
         val state = LiveTrackingState(enabled = true, screenMode = "big_map", bigMapGeometry = g, bigMapGeometryMode = "tracking")

@@ -22,6 +22,8 @@ class TrackingLogFilterTest {
         assertTrue(clean.endsWith(step))
         val cycle = "BigMap stage=cycle mode=MOTION readMs=2 bitmapMs=0 gateMs=0 nativeMs=26 lkMs=18 ransacMs=1 fallbackMs=0 publishMs=1 loopMs=35 idleMs=4"
         assertTrue(TrackingLogFilter.sanitize(capture(cycle),pid)!!.endsWith(cycle))
+        val draw = "BigMap stage=draw clock=monotonic ageAtDrawMs=125.5 ageAtDrawP95Ms=190 dtMs=120 extrapolated=true sample=last_draw predictedDraws=30 invalidAgeDraws=2"
+        assertTrue(TrackingLogFilter.sanitize(capture(draw),pid)!!.endsWith(draw))
         assertTrue(TrackingLogFilter.sanitize(native("BigMapMotion stage=abs_result outcome=discarded absReason=bridge_failed"), pid)!!.endsWith("absReason=bridge_failed"))
         for (stage in listOf("abs_request", "abs_result", "abs_apply", "abs_conflict", "lost"))
             assertTrue(TrackingLogFilter.sanitize(native("BigMapMotion stage=$stage outcome=suspect jumpPx=150 conflicts=1"), pid)!!.contains("stage=$stage"))
